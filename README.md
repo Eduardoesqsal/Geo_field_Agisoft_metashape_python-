@@ -1,205 +1,192 @@
 # Procesamiento Metashape + React
 
-Aplicacion para procesar imagenes con Agisoft Metashape desde un backend
+Aplicación para procesar imágenes con Agisoft Metashape desde un backend
 FastAPI y visualizar el resultado en una interfaz React a pantalla completa.
 
-## Que hace
+## Qué hace
 
-- recibe imagenes por carga directa, ZIP o Google Drive
-- ejecuta Metashape en segundo plano
-- exporta ortomosaico RGB y salida multiespectral
-- publica el ortomosaico RGB como overlay por tiles
-- muestra logs, estado, resumen y controles desde una UI React
-- permite reiniciar el flujo para crear un nuevo proyecto
+- Recibe imágenes por carga directa, ZIP o Google Drive
+- Ejecuta Metashape en segundo plano
+- Exporta ortomosaico RGB y salida multiespectral
+- Publica el ortomosaico RGB como overlay por tiles (Leaflet)
+- Muestra logs, estado, resumen y controles desde una UI React
+- Permite reiniciar el flujo para crear un nuevo proyecto
 
-## Estado actual
+## Estructura del proyecto
 
-La aplicacion ya esta organizada en dos partes:
-
-- `backend/` para FastAPI, workflow y servicios
-- `frontend/` para la UI React
-
-La interfaz web:
-
-- usa un mapa base satelital
-- muestra el ortomosaico final sobre el mapa
-- permite trabajar con cards flotantes
-- incluye acciones para subir datos, procesar y crear un nuevo proyecto
-
-## Estructura
-
-- `app.py`
-  - arranque principal del backend
-- `backend/`
-  - API, runtime, servicios y workflow de Metashape
-- `frontend/`
-  - React + Vite + estilos de la UI
-- `dataset/`
-  - entrada de imagenes
-- `proyecto/`
-  - proyecto Metashape y ortomosaicos exportados
-- `logs/`
-  - registros del proceso
+```
+.
+├── app.py                  # Arranque del backend (uvicorn)
+├── backend/
+│   ├── application.py      # Factory de FastAPI
+│   ├── config.py           # Rutas y nombres de proyecto
+│   ├── main.py             # Script de Metashape (worker)
+│   ├── routes.py           # Endpoints HTTP
+│   ├── runtime.py          # Estado compartido, logs, reset
+│   ├── workflow.py         # Pipeline de Metashape
+│   └── services/
+│       ├── ingestion.py    # Carga ZIP / Google Drive
+│       ├── overlay.py      # Generación de tiles del ortomosaico
+│       └── process.py      # Lanzar/detener proceso Metashape
+├── frontend/
+│   ├── src/
+│   │   ├── App.jsx         # UI principal + mapa Leaflet
+│   │   ├── main.jsx        # Entry point React
+│   │   └── styles.css      # Estilos
+│   ├── package.json
+│   ├── pnpm-lock.yaml
+│   └── vite.config.js
+├── dataset/                # Imágenes de entrada (ignorado por git)
+├── datasets_crudos/        # Datos crudos grandes (ignorado por git)
+├── proyecto/               # Salidas .psx, .tif, tiles (ignorado por git)
+├── logs/                   # Registros de proceso (ignorado por git)
+├── Dockerfile              # Build multi-etapa para producción
+├── .github/workflows/
+│   └── ci-cd.yml           # Pipeline CI/CD (GitHub Actions)
+└── requirements.txt        # Dependencias Python
+```
 
 ## Requisitos
 
+### Local (desarrollo con Metashape)
 - Windows
-- Python instalado
+- Python 3.11+
 - Agisoft Metashape Pro instalado
-- Node.js con soporte para `corepack`
-- Dependencias del backend y frontend instaladas
+- Node.js 24+ con corepack habilitado
+- pnpm (se activa vía corepack)
 
-## Instalacion
+### Solo contenedor (sin Metashape)
+- Docker
+- La API y el frontend funcionan, pero el procesamiento Metashape no estará disponible
+
+## Instalación y ejecución local
 
 ### Backend
 
-Instala dependencias Python segun tu entorno actual del proyecto.
+```bash
+pip install -r requirements.txt
+python app.py
+```
 
 ### Frontend
 
 ```bash
 cd frontend
+corepack enable
 corepack pnpm install
 corepack pnpm build
 ```
 
-## Como correr la app
-
-1. Compila el frontend:
+O para desarrollo con hot-reload:
 
 ```bash
-cd frontend
-corepack pnpm build
+corepack pnpm dev
 ```
 
-2. Ejecuta el backend desde la raiz del proyecto:
+## Docker
+
+### Construir imagen
 
 ```bash
-python app.py
+docker build -t geo-metashape .
 ```
 
-3. Abre la URL local que imprima el servidor.
+### Ejecutar contenedor
 
-## Docker y Render
+```bash
+docker run -p 10000:10000 geo-metashape
+```
 
-El proyecto incluye un `Dockerfile` en la raiz para desplegar el backend y el
-frontend compilado en un solo contenedor.
+La app estará disponible en `http://localhost:10000`.
 
-En Render puedes usar un Web Service basado en Docker. El servicio arranca la
-API y sirve la UI desde `frontend/dist/`.
+### Variables de entorno
 
-Notas importantes:
+| Variable | Descripción | Default |
+|---|---|---|
+| `PORT` | Puerto del servidor | `10000` |
+| `METASHAPE_EXE` | Ruta al ejecutable de Metashape | `C:\Program Files\Agisoft\Metashape Pro\metashape.exe` |
+| `METASHAPE_PROJECT_NAME` | Nombre del proyecto | `test_agisoft` |
 
-- Render define `PORT` automaticamente para el contenedor.
-- La ruta de Metashape se puede ajustar con la variable `METASHAPE_EXE`.
-- Si `METASHAPE_EXE` no apunta a un ejecutable valido, la app arranca pero el
-  endpoint de procesado devolvera error al intentar iniciar Metashape.
-- GitHub Actions puede disparar el deploy con un `RENDER_DEPLOY_HOOK_URL`
-  guardado como secret.
+## CI/CD (GitHub Actions)
+
+El pipeline en `.github/workflows/ci-cd.yml` se ejecuta en cada push a `main` y pull request:
+
+| Job | Descripción |
+|---|---|
+| `frontend` | Compila el frontend con Node 24 + pnpm |
+| `backend` | Verifica sintaxis de Python con `compileall` |
+| `docker` | Construye la imagen Docker (depende de frontend + backend) |
+| `deploy` | Dispara deploy en Render vía webhook (solo en push a `main`) |
+
+### Secretos de GitHub requeridos
+
+Para activar el deploy automático a Render:
+
+1. En Render: Dashboard → Web Service → Settings → Deploy Hook → copiar URL
+2. En GitHub: repo → Settings → Secrets and variables → Actions → New repository secret
+3. **Nombre**: `RENDER_DEPLOY_HOOK_URL`
+4. **Valor**: pegar la URL del hook de Render
+
+## Despliegue en Render
+
+1. Crea un Web Service en https://dashboard.render.com
+2. Conecta tu repositorio de GitHub
+3. Configura:
+
+| Campo | Valor |
+|---|---|
+| **Name** | `geo-agisoft-metashape` |
+| **Runtime** | Docker |
+| **Branch** | `main` |
+| **Root Directory** | (vacío) |
+| **Port** | `10000` |
+
+4. Agrega el secreto `RENDER_DEPLOY_HOOK_URL` en GitHub
+5. Cada push a `main` construye y despliega automáticamente
+
+> **Nota:** Render no tiene GPU ni Agisoft Metashape. La API y el frontend funcionarán, pero el procesamiento de imágenes requiere una máquina con Metashape (Windows + GPU).
+
+## Endpoints de la API
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| `GET` | `/status` | Estado del proceso |
+| `GET` | `/logs` | Logs del proceso |
+| `GET` | `/ingesta/estado` | Estado de la ingesta |
+| `POST` | `/ingesta/zip` | Subir imágenes en ZIP |
+| `POST` | `/ingesta/drive` | Importar desde Google Drive |
+| `POST` | `/proyecto/nombre` | Cambiar nombre del proyecto |
+| `POST` | `/proyecto/nuevo` | Resetear proyecto |
+| `POST` | `/procesar` | Iniciar procesamiento |
+| `POST` | `/start` | Iniciar procesamiento |
+| `POST` | `/stop` | Detener procesamiento |
+| `GET` | `/overlay/status` | Estado del overlay |
+| `GET` | `/overlay/rgb.png` | PNG del ortomosaico RGB |
+| `GET` | `/tiles/rgb/{z}/{x}/{y}.png` | Tiles del ortomosaico |
+
+## Formatos de entrada aceptados
+
+- Solo JPG
+- Solo TIFF
+- JPG + TIFF
+- Datos multiespectrales RedEdge-M (MicaSense)
 
 ## Flujo de trabajo
 
-1. Cargas imagenes en `dataset/` o por la UI.
-2. Guardas o cambias el nombre del proyecto.
-3. Inicias el procesamiento.
-4. Metashape genera el ortomosaico.
-5. El backend publica el raster como overlay/tile layer.
-6. La UI cambia al ortomosaico final.
-7. Si quieres otro proyecto, usas `Nuevo proyecto`.
+1. Carga imágenes en `dataset/` o por la UI (ZIP / Google Drive)
+2. Define o cambia el nombre del proyecto
+3. Selecciona el modelo de cámara
+4. Inicia el procesamiento
+5. Metashape genera el ortomosaico
+6. El backend publica el raster como overlay de tiles
+7. La UI muestra el ortomosaico final sobre el mapa
+8. Para un nuevo proyecto, usa `Nuevo proyecto`
 
-## Funciones clave
+## UI React
 
-- `POST /ingesta/zip`
-- `POST /ingesta/drive`
-- `POST /proyecto/nombre`
-- `POST /proyecto/nuevo`
-- `POST /procesar`
-- `POST /start`
-- `POST /stop`
-- `GET /status`
-- `GET /logs`
-- `GET /overlay/status`
-- `GET /overlay/rgb.png`
-- `GET /tiles/rgb/{z}/{x}/{y}.png`
-
-## Ingesta
-
-La app acepta:
-
-- solo JPG
-- solo TIFF
-- JPG + TIFF
-- datos multiespectrales RedEdge-M
-
-## Salidas
-
-El backend trabaja con:
-
-- `proyecto/*.psx`
-- `proyecto/*_rgb.tif`
-- `proyecto/*_ms.tif`
-- tiles servidos desde el raster RGB exportado
-
-## UI
-
-La UI React incluye:
-
-- mapa base Bing Aerial con scroll zoom nativo de Leaflet
-- cards flotantes sobre el mapa
-- logs
-- resumen
-- controles de proyecto
-- selector de modelo de camara
-- carga de archivos
-- boton de nuevo proyecto
-
-### Interaccion con el mapa
-
-El panel de control se superpone al mapa pero solo las cards capturan
-eventos de puntero (`.card { pointer-events: auto }`). Las areas vacias del
-layout dejan pasar clics y scroll al mapa, permitiendo pan y zoom natural.
-El scroll zoom usa el handler nativo de Leaflet (`scrollWheelZoom: true`).
-El nivel maximo de zoom es 24; los tiles de Bing tienen `maxNativeZoom: 19`.
-
-## Nuevo proyecto
-
-Cuando un procesamiento termina, puedes reiniciar el flujo con `Nuevo proyecto`.
-Ese paso limpia el estado de runtime y prepara la app para volver a procesar
-otro conjunto de imagenes.
-
-## Notas de implementacion
-
-- El backend mantiene el estado del proceso en memoria.
-- El overlay final se genera desde el ortomosaico RGB exportado.
-- La UI no replica la logica de procesamiento, solo consume los endpoints.
-- Si tocas el mapa, valida pan, zoom y overlay final.
-
-## Comandos utiles
-
-```bash
-cd frontend
-corepack pnpm install
-corepack pnpm build
-```
-
-```bash
-python app.py
-```
-
-## Archivos importantes
-
-- [app.py](./app.py)
-- [backend/runtime.py](./backend/runtime.py)
-- [backend/routes.py](./backend/routes.py)
-- [backend/services/process.py](./backend/services/process.py)
-- [backend/services/overlay.py](./backend/services/overlay.py)
-- [backend/workflow.py](./backend/workflow.py)
-- [frontend/src/App.jsx](./frontend/src/App.jsx)
-- [frontend/src/styles.css](./frontend/src/styles.css)
-
-## Resumen rapido
-
-Esta app es un sistema de procesamiento fotogrametrico con Metashape, backend
-FastAPI y frontend React. El objetivo principal es cargar imagenes, procesarlas,
-publicar el ortomosaico y permitir reiniciar el flujo para nuevos proyectos sin
-reconstruir la aplicacion.
+- Mapa base Bing Aerial con scroll zoom nativo de Leaflet
+- Cards flotantes sobre el mapa (controles, logs, resumen)
+- Selector de modelo de cámara
+- Carga de archivos (ZIP)
+- Botón de nuevo proyecto
+- Panel de control con `pointer-events: none` (solo las cards capturan eventos)
