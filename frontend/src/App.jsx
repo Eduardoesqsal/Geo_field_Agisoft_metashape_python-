@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import L from 'leaflet'
 
-const API_BASE = import.meta.env.VITE_API_URL || ''
+const API_BASE = window.API_BASE || ''
 
 const DEFAULT_CENTER = [23.6345, -102.5528]
 
