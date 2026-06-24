@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.log
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+
+# Runtime outputs
+logs/
+proyecto/
+
+# Local data drops
+dataset/
+datasets_crudos/
+
+# Environment files
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
