@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import L from 'leaflet'
 
+const API_BASE = import.meta.env.VITE_API_URL || ''
+
 const DEFAULT_CENTER = [23.6345, -102.5528]
 
 function formatDate(value) {
@@ -20,7 +22,7 @@ function stateTone(status) {
 }
 
 function apiJson(path, options = {}) {
-  return fetch(path, options).then(async (response) => {
+  return fetch(`${API_BASE}${path}`, options).then(async (response) => {
     const text = await response.text()
     let data = {}
     try {
@@ -212,7 +214,7 @@ function MapView({ points, overlay, finalMode }) {
         map.removeLayer(overlayLayerRef.current)
       }
 
-      const layer = L.tileLayer(`/tiles/rgb/{z}/{x}/{y}.png?v=${encodeURIComponent(overlayToken)}`, {
+      const layer = L.tileLayer(`${API_BASE}/tiles/rgb/{z}/{x}/{y}.png?v=${encodeURIComponent(overlayToken)}`, {
         bounds: overlay.bounds,
         opacity: 1,
         tileSize: 256,
@@ -512,7 +514,7 @@ export default function App() {
     formData.append('archivo', file)
 
     const xhr = new XMLHttpRequest()
-    xhr.open('POST', '/ingesta/zip', true)
+    xhr.open('POST', `${API_BASE}/ingesta/zip`, true)
     xhr.responseType = 'json'
 
     xhr.upload.onprogress = (evt) => {
