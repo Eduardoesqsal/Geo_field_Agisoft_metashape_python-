@@ -106,9 +106,9 @@ button:disabled {
 .topbar {
   position: fixed;
   z-index: 4;
-  top: 20px;
-  left: 20px;
-  right: 20px;
+  top: 14px;
+  left: 16px;
+  right: 16px;
   display: flex;
   justify-content: space-between;
   gap: 16px;
@@ -132,7 +132,7 @@ button:disabled {
 
 .brand h1 {
   margin: 0;
-  font-size: clamp(4rem, 6.4vw, 8rem);
+  font-size: clamp(2.2rem, 3.8vw, 4.7rem);
   line-height: 0.9;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -144,7 +144,7 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 14px;
+  padding: 10px 12px;
   border-radius: 999px;
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.95);
@@ -191,14 +191,14 @@ button:disabled {
 .control-panel {
   position: fixed;
   z-index: 3;
-  top: 210px;
+  top: 112px;
   left: 18px;
   right: 18px;
   bottom: 18px;
   width: auto;
   height: auto;
   max-height: none;
-  overflow: hidden;
+  overflow: auto;
   display: grid;
   gap: 14px;
   padding: 0;
@@ -227,9 +227,9 @@ button:disabled {
   grid-template-columns: minmax(320px, 430px) minmax(320px, 430px);
   justify-content: space-between;
   grid-template-rows: 1fr auto;
-  gap: 14px;
+  gap: 10px;
   align-items: start;
-  min-height: 100%;
+  min-height: 0;
 }
 
 .panel-top {
@@ -237,13 +237,13 @@ button:disabled {
   grid-column: 1 / -1;
   grid-template-columns: minmax(320px, 430px) minmax(320px, 430px);
   justify-content: space-between;
-  gap: 14px;
+  gap: 10px;
   align-self: start;
 }
 
 .panel-column {
   display: grid;
-  gap: 14px;
+  gap: 10px;
   align-content: start;
 }
 
@@ -252,7 +252,7 @@ button:disabled {
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
 }
 
 .panel-column-right {
@@ -298,7 +298,7 @@ button:disabled {
 .glass-card {
   background: rgba(255, 255, 255, 0.9);
   border: 1px solid rgba(255, 255, 255, 0.88);
-  border-radius: 28px;
+  border-radius: 20px;
   box-shadow:
     0 18px 42px rgba(15, 23, 42, 0.12),
     inset 0 1px 0 rgba(255, 255, 255, 0.75);
@@ -310,7 +310,7 @@ button:disabled {
 }
 
 .glass-card {
-  padding: 16px 18px;
+  padding: 12px 14px;
 }
 
 .section-head {
@@ -331,9 +331,9 @@ button:disabled {
 }
 
 .section-head h2 > .ui-icon {
-  width: 30px;
-  height: 30px;
-  padding: 7px;
+  width: 26px;
+  height: 26px;
+  padding: 6px;
   border-radius: 50%;
   color: #fff;
   background: linear-gradient(145deg, var(--ui-navy), #245d73);
@@ -380,7 +380,7 @@ button:disabled {
   border-radius: 18px;
   background: #fff;
   color: var(--text);
-  padding: 13px 14px;
+  padding: 10px 12px;
   outline: none;
   box-shadow:
     inset 0 1px 1px rgba(15, 23, 42, 0.03),
@@ -396,8 +396,8 @@ button:disabled {
 
 .action-row {
   display: grid;
-  grid-template-columns: repeat(10, minmax(72px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(10, minmax(62px, 1fr));
+  gap: 6px;
 }
 
 .action-row-tight {
@@ -442,18 +442,18 @@ button:disabled {
 .round-action {
   width: 100%;
   min-width: 0;
-  min-height: 82px;
+  min-height: 56px;
   padding: 2px 3px;
   border-radius: 18px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: flex-start;
-  gap: 7px;
+  gap: 4px;
   color: #344054;
   background: transparent;
   box-shadow: none;
-  font-size: 0.7rem;
+  font-size: 0.62rem;
   font-weight: 750;
   line-height: 1.15;
   text-align: center;
@@ -470,8 +470,8 @@ button:disabled {
 }
 
 .round-action-icon {
-  width: 52px;
-  height: 52px;
+  width: 34px;
+  height: 34px;
   flex: none;
   display: grid;
   place-items: center;
@@ -491,8 +491,8 @@ button:disabled {
 }
 
 .round-action-icon .ui-icon {
-  width: 22px;
-  height: 22px;
+  width: 15px;
+  height: 15px;
   stroke-width: 1.9;
 }
 
@@ -619,20 +619,20 @@ button:disabled {
 }
 
 .metric {
-  border-radius: 20px;
+  border-radius: 14px;
   border: 1px solid rgba(15, 23, 42, 0.08);
   background: linear-gradient(180deg, #ffffff, #fbfdff);
-  padding: 12px;
-  min-height: 82px;
+  padding: 8px;
+  min-height: 56px;
 }
 
 .metric.metric-light {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr);
+  grid-template-columns: 30px minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
-  min-height: 72px;
-  padding: 10px;
+  gap: 8px;
+  min-height: 54px;
+  padding: 8px;
 }
 
 .metric-icon,
@@ -646,13 +646,13 @@ button:disabled {
 }
 
 .metric-icon {
-  width: 38px;
-  height: 38px;
+  width: 30px;
+  height: 30px;
 }
 
 .metric-icon .ui-icon {
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
 }
 
 .metric-copy,
@@ -676,12 +676,12 @@ button:disabled {
 
 .metric span {
   color: var(--muted);
-  font-size: 0.82rem;
-  margin-bottom: 8px;
+  font-size: 0.72rem;
+  margin-bottom: 4px;
 }
 
 .metric strong {
-  font-size: 1.05rem;
+  font-size: 0.88rem;
   line-height: 1.2;
 }
 
@@ -690,8 +690,8 @@ button:disabled {
 }
 
 .status-list > div {
-  padding: 11px;
-  border-radius: 18px;
+  padding: 8px;
+  border-radius: 14px;
   background: linear-gradient(180deg, #ffffff, #fbfdff);
   border: 1px solid rgba(15, 23, 42, 0.08);
 }
@@ -711,8 +711,8 @@ button:disabled {
 }
 
 .detail-icon {
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
 }
 
 .detail-icon .ui-icon {
@@ -742,18 +742,18 @@ button:disabled {
 .panel-vector-card {
   width: 100%;
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 
 .vector-summary {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
 }
 
 .vector-summary div {
-  padding: 11px;
-  border-radius: 18px;
+  padding: 8px;
+  border-radius: 14px;
   background: linear-gradient(180deg, #ffffff, #fbfdff);
   border: 1px solid rgba(15, 23, 42, 0.08);
 }
@@ -798,12 +798,12 @@ button:disabled {
   grid-column: 1 / -1;
   justify-self: center;
   width: min(1120px, calc(100vw - 40px));
-  min-height: 270px;
+  min-height: 0;
   margin-top: 0;
 }
 
 .panel-bottom-card.glass-card {
-  padding: 11px 14px;
+  padding: 8px 10px;
 }
 
 .panel-bottom-card .action-row {
@@ -819,8 +819,8 @@ button:disabled {
 .panel-bottom-card .field input,
 .panel-bottom-card .field select,
 .panel-bottom-card .drive-box input {
-  padding-top: 10px;
-  padding-bottom: 10px;
+  padding-top: 8px;
+  padding-bottom: 8px;
 }
 
 .panel-bottom-card .section-head {
@@ -829,10 +829,10 @@ button:disabled {
 
 .logs-panel {
   margin: 0;
-  max-height: 240px;
+  max-height: 160px;
   overflow: auto;
-  padding: 12px;
-  border-radius: 20px;
+  padding: 8px;
+  border-radius: 14px;
   background: linear-gradient(180deg, #ffffff, #fbfdff);
   border: 1px solid rgba(15, 23, 42, 0.08);
   white-space: pre-wrap;
@@ -842,7 +842,7 @@ button:disabled {
 }
 
 .logs-panel-tight {
-  max-height: 240px;
+  max-height: 160px;
 }
 
 .leaflet-container {
@@ -1187,7 +1187,7 @@ button:disabled {
   }
 
   .control-panel {
-    top: 198px;
+    top: 112px;
     left: 16px;
     right: 16px;
     bottom: 14px;
@@ -1211,7 +1211,7 @@ button:disabled {
   }
 
   .brand h1 {
-    font-size: 3.9rem;
+    font-size: 2.4rem;
   }
 }
 
@@ -1239,7 +1239,7 @@ button:disabled {
   }
 
   .control-panel {
-    top: 120px;
+    top: 92px;
     left: 8px;
     right: 8px;
     bottom: 8px;
@@ -1311,8 +1311,24 @@ button:disabled {
   }
 
   .action-row {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     gap: 5px;
+  }
+
+  .round-action {
+    min-height: 58px;
+    font-size: 0.62rem;
+    gap: 4px;
+  }
+
+  .round-action-icon {
+    width: 34px;
+    height: 34px;
+  }
+
+  .round-action-icon .ui-icon {
+    width: 15px;
+    height: 15px;
   }
 
   .primary,
@@ -1399,7 +1415,7 @@ button:disabled {
   }
 
   .brand h1 {
-    font-size: 2.4rem;
+    font-size: 2rem;
     letter-spacing: 0.065em;
     color: rgba(255, 255, 255, 0.98);
   }
@@ -1440,7 +1456,7 @@ button:disabled {
   }
 
   .brand h1 {
-    font-size: 1.5rem;
+    font-size: 1.35rem;
   }
 
   .status-pill {
@@ -1463,7 +1479,7 @@ button:disabled {
   }
 
   .control-panel {
-    top: 95px;
+    top: 72px;
     left: 4px;
     right: 4px;
     bottom: 4px;
@@ -1535,7 +1551,18 @@ button:disabled {
   }
 
   .action-row {
+    grid-template-columns: repeat(4, 1fr);
     gap: 4px;
+  }
+
+  .round-action {
+    min-height: 50px;
+    font-size: 0.56rem;
+  }
+
+  .round-action-icon {
+    width: 30px;
+    height: 30px;
   }
 
   .primary,
