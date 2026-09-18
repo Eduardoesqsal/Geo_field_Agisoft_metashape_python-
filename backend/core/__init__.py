@@ -1,0 +1,1 @@
+"""Nucleo compartido del backend."""

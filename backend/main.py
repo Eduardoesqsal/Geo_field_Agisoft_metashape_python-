@@ -44,19 +44,20 @@ def main():
     log_file, original_stdout, original_stderr = crear_logger()
     print("--- INICIANDO FLUJO COMPLETO ---", flush=True)
     app = None
+    error = None
 
     try:
-        camera_model = os.environ.get("METASHAPE_CAMERA_MODEL", "mavic_3m")
+        camera_model = os.environ.get("METASHAPE_CAMERA_MODEL", "mavic_3_rgb")
         app = ProcesamientoMetashape(camera_model=camera_model)
         app.cargar_fotos()
         app.alinear_camaras()
-        app.construir_profundidad()
-        app.construir_modelo()
+        app.construir_mde()
         app.construir_ortomosaico()
         app.exportar_resultado()
 
         print("\n--- FINALIZADO SIN ERRORES ---", flush=True)
     except Exception as e:
+        error = e
         print(f"\nERROR EN EL PROCESO: {e}", flush=True)
         print(traceback.format_exc(), flush=True)
     finally:
@@ -68,6 +69,11 @@ def main():
         sys.stdout = original_stdout
         sys.stderr = original_stderr
         log_file.close()
+
+    if error is not None:
+        # Las excepciones reales deben llegar al ejecutable para que el backend
+        # pueda distinguirlas de una ejecucion terminada correctamente.
+        raise error
 
 
 if __name__ == "__main__":

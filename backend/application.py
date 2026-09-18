@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import backend.runtime as runtime
 from backend.routes import router
+from backend.routes_distributed import router as distributed_router
 
 
 def create_app():
@@ -16,6 +17,7 @@ def create_app():
         allow_headers=["*"],
     )
 
+    app.include_router(distributed_router)
     app.include_router(router)
     return app
 

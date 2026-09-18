@@ -1,11 +1,16 @@
 import os
+import re
 import shutil
+import subprocess
+import tempfile
 import zipfile
 from datetime import datetime
 from fractions import Fraction
 from io import BytesIO
+from urllib.parse import parse_qs, urlparse
 
 import requests
+import gdown
 from fastapi import HTTPException
 from PIL import ExifTags, Image
 
@@ -184,25 +189,109 @@ def _extraer_id_drive(url):
         raise HTTPException(status_code=400, detail="URL invalida")
 
     url = url.strip()
-    if "drive.google.com" not in url:
+    parsed = urlparse(url)
+    if parsed.netloc not in {"drive.google.com", "www.drive.google.com"}:
         raise HTTPException(status_code=400, detail="URL invalida: debe ser un enlace publico de Google Drive")
 
-    if "/file/d/" in url:
-        parts = url.split("/file/d/", 1)[1]
-        return parts.split("/", 1)[0]
-    if "id=" in url:
-        return url.split("id=", 1)[1].split("&", 1)[0]
+    match = re.search(r"/(?:file/d|folders)/([^/?#]+)", parsed.path)
+    if match:
+        return match.group(1), "/folders/" in parsed.path
+
+    file_id = parse_qs(parsed.query).get("id", [None])[0]
+    if file_id:
+        return file_id, False
 
     raise HTTPException(status_code=400, detail="No se pudo extraer el ID del archivo de Drive")
 
 
-def _descargar_zip_drive(url):
-    file_id = _extraer_id_drive(url)
-    session = requests.Session()
-    download_url = "https://drive.google.com/uc?export=download&id={}".format(file_id)
+def _es_ruta_rclone(valor):
+    return bool(re.match(r"^[A-Za-z0-9_.-]+:.+", (valor or "").strip()))
+
+
+def _descargar_carpeta_rclone(ruta_remota):
+    """Copia una carpeta de un remote rclone a un directorio temporal."""
+    ruta_remota = ruta_remota.strip()
+    if not _es_ruta_rclone(ruta_remota):
+        raise HTTPException(status_code=400, detail="Ruta rclone invalida. Usa remote:ruta/carpeta")
 
     try:
-        response = session.get(download_url, stream=True, timeout=60)
+        with tempfile.TemporaryDirectory(prefix="rclone_ingesta_") as tmpdir:
+            resultado = subprocess.run(
+                ["rclone", "copy", ruta_remota, tmpdir, "--create-empty-src-dirs"],
+                capture_output=True,
+                text=True,
+                timeout=3600,
+                check=False,
+            )
+            if resultado.returncode != 0:
+                detalle = (resultado.stderr or resultado.stdout or "sin detalle").strip()
+                raise HTTPException(status_code=400, detail=f"rclone no pudo descargar la carpeta: {detalle}")
+
+            archivos = [
+                os.path.join(root, nombre)
+                for root, _, nombres in os.walk(tmpdir)
+                for nombre in nombres
+            ]
+            if not archivos:
+                raise HTTPException(status_code=400, detail="La ruta rclone no contiene archivos")
+
+            _limpiar_directorio_imagenes()
+            usados = set()
+            imagenes_validas = 0
+            archivos_zip = []
+            for ruta_origen in archivos:
+                nombre = os.path.basename(ruta_origen)
+                if nombre.lower().endswith(".zip"):
+                    archivos_zip.append(ruta_origen)
+                    continue
+                if not _es_imagen_valida(nombre):
+                    continue
+
+                destino_nombre = nombre
+                base, extension = os.path.splitext(nombre)
+                contador = 2
+                while destino_nombre.lower() in usados:
+                    destino_nombre = f"{base}_{contador}{extension}"
+                    contador += 1
+                usados.add(destino_nombre.lower())
+                shutil.copy2(ruta_origen, os.path.join(RUTA_IMAGENES, destino_nombre))
+                imagenes_validas += 1
+
+            if imagenes_validas == 0 and archivos_zip:
+                with open(archivos_zip[0], "rb") as archivo_zip:
+                    total, imagenes = _extraer_zip_a_dataset(BytesIO(archivo_zip.read()))
+            else:
+                total, imagenes = len(archivos), imagenes_validas
+
+        if imagenes == 0:
+            raise HTTPException(status_code=400, detail="La ruta rclone no contiene imagenes validas")
+        runtime.update_ingesta_info(
+            origen="rclone",
+            actualizado_en=datetime.now().isoformat(timespec="seconds"),
+            total_archivos=total,
+            imagenes_validas=imagenes,
+        )
+        runtime.update_state(step="ingestado", message="Carpeta rclone cargada")
+        _actualizar_puntos_gps_desde_dataset()
+        return total, imagenes
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=400, detail="rclone tardo demasiado en descargar la carpeta") from exc
+
+
+def _descargar_zip_drive(url):
+    file_id, es_carpeta = _extraer_id_drive(url)
+    if es_carpeta:
+        raise HTTPException(status_code=500, detail="Las carpetas deben descargarse con _descargar_carpeta_drive")
+    session = requests.Session()
+    # Drive genera un ZIP temporal cuando se descarga una carpeta desde su UI.
+    if es_carpeta:
+        download_url = "https://drive.usercontent.google.com/download"
+    else:
+        download_url = "https://drive.google.com/uc"
+    params = {"export": "download", "id": file_id}
+
+    try:
+        response = session.get(download_url, params=params, stream=True, timeout=120)
         response.raise_for_status()
 
         token = None
@@ -211,27 +300,118 @@ def _descargar_zip_drive(url):
                 token = value
                 break
 
+        # En algunas descargas Drive entrega una pagina HTML con un formulario
+        # de confirmacion en lugar de usar una cookie.
+        if not token and "text/html" in response.headers.get("content-type", "").lower():
+            pagina = response.text
+            match = re.search(r'name="confirm" value="([^"]+)"', pagina)
+            if match:
+                token = match.group(1)
+
         if token:
             response.close()
-            response = session.get(
-                download_url,
-                params={"confirm": token, "id": file_id},
-                stream=True,
-                timeout=60,
-            )
+            params["confirm"] = token
+            response = session.get(download_url, params=params, stream=True, timeout=120)
             response.raise_for_status()
 
         content_type = response.headers.get("content-type", "").lower()
-        if "text/html" in content_type and "zip" not in content_type:
-            raise HTTPException(status_code=400, detail="El enlace de Drive no parece apuntar a un ZIP publico")
+        if "text/html" in content_type:
+            raise HTTPException(
+                status_code=400,
+                detail="Drive no permitio la descarga. Verifica que el archivo o carpeta sea publico.",
+            )
 
         contenido = BytesIO()
         for chunk in response.iter_content(chunk_size=1024 * 1024):
             if chunk:
                 contenido.write(chunk)
         contenido.seek(0)
+        if not zipfile.is_zipfile(contenido):
+            raise HTTPException(
+                status_code=400,
+                detail="El enlace de Drive no devolvio un ZIP. Comparte una carpeta o archivo ZIP publico.",
+            )
         return contenido
     except requests.exceptions.HTTPError as exc:
         raise HTTPException(status_code=400, detail="No se pudo descargar el archivo desde Drive") from exc
     except requests.exceptions.RequestException as exc:
         raise HTTPException(status_code=400, detail="Error de red al descargar desde Drive") from exc
+
+
+def _descargar_carpeta_drive(url):
+    """Descarga una carpeta publica y copia sus imagenes al dataset."""
+    file_id, es_carpeta = _extraer_id_drive(url)
+    if not es_carpeta:
+        raise HTTPException(status_code=400, detail="El enlace no corresponde a una carpeta de Google Drive")
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="drive_ingesta_") as tmpdir:
+            rutas = gdown.download_folder(
+                id=file_id,
+                output=tmpdir,
+                quiet=False,
+                use_cookies=False,
+                remaining_ok=True,
+            )
+            if not rutas:
+                runtime.push_log("Drive: gdown no devolvio archivos para la carpeta")
+                raise HTTPException(
+                    status_code=400,
+                    detail="No se pudo descargar la carpeta. Verifica que sea publica y tenga archivos.",
+                )
+
+            _limpiar_directorio_imagenes()
+            total_archivos = 0
+            imagenes_validas = 0
+            archivos_zip = []
+            usados = set()
+            for root, _, files in os.walk(tmpdir):
+                for nombre in files:
+                    total_archivos += 1
+                    ruta_origen = os.path.join(root, nombre)
+                    if nombre.lower().endswith(".zip"):
+                        archivos_zip.append(ruta_origen)
+                        continue
+                    if not _es_imagen_valida(nombre):
+                        continue
+
+                    destino_nombre = nombre
+                    base, extension = os.path.splitext(nombre)
+                    contador = 2
+                    while destino_nombre.lower() in usados:
+                        destino_nombre = f"{base}_{contador}{extension}"
+                        contador += 1
+                    usados.add(destino_nombre.lower())
+                    shutil.copy2(ruta_origen, os.path.join(RUTA_IMAGENES, destino_nombre))
+                    imagenes_validas += 1
+
+            # Si la carpeta contiene un ZIP, procesarlo como una carga anidada.
+            if imagenes_validas == 0 and archivos_zip:
+                with open(archivos_zip[0], "rb") as archivo_zip:
+                    total_zip, imagenes_zip = _extraer_zip_a_dataset(BytesIO(archivo_zip.read()))
+                runtime.update_ingesta_info(origen="drive", total_archivos=total_zip, imagenes_validas=imagenes_zip)
+                return total_zip, imagenes_zip
+
+        if imagenes_validas == 0:
+            raise HTTPException(status_code=400, detail="La carpeta no contiene imagenes validas")
+
+        runtime.update_ingesta_info(
+            origen="drive",
+            actualizado_en=datetime.now().isoformat(timespec="seconds"),
+            total_archivos=total_archivos,
+            imagenes_validas=imagenes_validas,
+        )
+        runtime.update_state(step="ingestado", message="Carpeta de Drive cargada")
+        _actualizar_puntos_gps_desde_dataset()
+        return total_archivos, imagenes_validas
+    except HTTPException:
+        raise
+    except Exception as exc:
+        runtime.push_log(f"Drive: error descargando carpeta: {exc}")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No se pudo importar la carpeta de Drive. Verifica que sea publica, "
+                f"accesible sin iniciar sesion y contenga imagenes o un ZIP: {exc}"
+            ),
+        ) from exc

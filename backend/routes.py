@@ -1,51 +1,55 @@
 import json
 import os
-import tempfile
-import zipfile
 from io import BytesIO
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 
-import backend.runtime as runtime
+import backend.core.state as runtime_state
+from backend.core.frontend import frontend_dist_path, serve_frontend_index
 from backend.services.ingestion import (
+    _descargar_carpeta_drive,
+    _descargar_carpeta_rclone,
     _contar_imagenes_en_directorio,
     _descargar_zip_drive,
+    _extraer_id_drive,
+    _es_ruta_rclone,
     _extraer_zip_a_dataset,
 )
 from backend.services.overlay import (
-    _buscar_archivo_vectorial_extraido,
-    _cargar_overlay_shapefile_desde_ruta,
+    _cache_buster_tiles_rgb,
     _generar_png_overlay_rgb,
     _leer_tile_ortomosaico,
-    _sincronizar_overlay_shapefile,
     _bounds_ortomosaico_rgb,
+    _raster_tiene_datos_rgb,
     _ruta_ortomosaico_ms,
     _ruta_ortomosaico_rgb,
 )
-from backend.services.process import detener_proceso, iniciar_proceso
+from backend.services.vector_overlay import cargar_y_sincronizar_desde_upload
+from backend.services.contours import eliminar_curvas_nivel, estado_curvas_nivel, geojson_curvas_nivel
+from backend.services.process import detener_proceso, iniciar_curvas_nivel, iniciar_proceso
 
 router = APIRouter()
 
 
 @router.get("/_old_root")
 def root():
-    return runtime.serve_frontend_index()
+    return serve_frontend_index()
 
 
 @router.get("/")
 def root_map():
-    return runtime.serve_frontend_index()
+    return serve_frontend_index()
 
 
 @router.get("/status")
 def status():
-    return runtime.snapshot_state()
+    return runtime_state.snapshot_state()
 
 
 @router.get("/logs")
 def get_logs():
-    return {"logs": runtime.snapshot_logs()}
+    return {"logs": runtime_state.snapshot_logs()}
 
 
 @router.get("/overlay/status")
@@ -54,22 +58,19 @@ def overlay_status():
     ruta_ms = _ruta_ortomosaico_ms()
     bounds = _bounds_ortomosaico_rgb()
     cache_buster = None
-    disponible = bool(ruta) and os.path.exists(ruta)
+    disponible = _raster_tiene_datos_rgb(ruta)
     disponible_ms = bool(ruta_ms) and os.path.exists(ruta_ms)
-    with runtime.lock:
-        if not disponible and runtime.overlay_cache.get("png") is not None and runtime.overlay_cache.get("ruta") == ruta:
+    with runtime_state.lock:
+        if not disponible and runtime_state.overlay_cache.get("png") is not None and runtime_state.overlay_cache.get("ruta") == ruta:
             disponible = True
-            if runtime.overlay_cache.get("bounds") is not None:
-                bounds = runtime.overlay_cache["bounds"]
-            if runtime.overlay_cache.get("cache_buster") is not None:
-                cache_buster = runtime.overlay_cache["cache_buster"]
+            if runtime_state.overlay_cache.get("bounds") is not None:
+                bounds = runtime_state.overlay_cache["bounds"]
+            if runtime_state.overlay_cache.get("cache_buster") is not None:
+                cache_buster = runtime_state.overlay_cache["cache_buster"]
 
-    if ruta and os.path.exists(ruta):
-        try:
-            cache_buster = int(os.path.getmtime(ruta))
-        except Exception:
-            cache_buster = None
-    runtime.update_ingesta_info(overlay_raster=ruta if ruta and os.path.exists(ruta) else None, overlay_bounds=bounds)
+    if disponible and ruta and os.path.exists(ruta):
+        cache_buster = _cache_buster_tiles_rgb(ruta)
+    runtime_state.update_ingesta_info(overlay_raster=ruta if disponible else None, overlay_bounds=bounds)
     return {
         "ok": True,
         "disponible": disponible,
@@ -87,6 +88,19 @@ def overlay_rgb_png():
     return Response(content=contenido, media_type="image/png")
 
 
+@router.get("/overlay/contours/status")
+def overlay_contours_status():
+    return estado_curvas_nivel()
+
+
+@router.get("/overlay/contours.geojson")
+def overlay_contours_geojson():
+    geojson = geojson_curvas_nivel()
+    if geojson is None:
+        raise HTTPException(status_code=404, detail="Curvas de nivel no disponibles")
+    return Response(content=json.dumps(geojson), media_type="application/geo+json")
+
+
 @router.get("/overlay/ms/status")
 def overlay_ms_status():
     ruta = _ruta_ortomosaico_ms()
@@ -100,84 +114,66 @@ def overlay_ms_status():
 
 @router.get("/overlay/shapefile/status")
 def overlay_shapefile_status():
-    with runtime.lock:
-        disponible = runtime.shapefile_overlay_cache.get("geojson") is not None
-        bounds = runtime.shapefile_overlay_cache.get("bounds")
-        cache_buster = runtime.shapefile_overlay_cache.get("cache_buster")
-        nombre = runtime.shapefile_overlay_cache.get("nombre")
+    with runtime_state.lock:
+        disponible = runtime_state.shapefile_overlay_cache.get("geojson") is not None
+        bounds = runtime_state.shapefile_overlay_cache.get("bounds")
+        cache_buster = runtime_state.shapefile_overlay_cache.get("cache_buster")
+        nombre = runtime_state.shapefile_overlay_cache.get("nombre")
+        formato = runtime_state.shapefile_overlay_cache.get("formato")
+        superficie_m2 = runtime_state.shapefile_overlay_cache.get("superficie_m2")
+        superficie_ha = runtime_state.shapefile_overlay_cache.get("superficie_ha")
+        feature_count = runtime_state.shapefile_overlay_cache.get("feature_count")
     return {
         "ok": True,
         "disponible": disponible,
         "bounds": bounds,
         "cache_buster": cache_buster,
         "nombre": nombre,
+        "formato": formato,
+        "superficie_m2": superficie_m2,
+        "superficie_ha": superficie_ha,
+        "feature_count": feature_count,
     }
+
+
+@router.get("/overlay/vector/status")
+def overlay_vector_status():
+    return overlay_shapefile_status()
 
 
 @router.get("/overlay/shapefile.geojson")
 def overlay_shapefile_geojson():
-    with runtime.lock:
-        geojson = runtime.shapefile_overlay_cache.get("geojson")
+    with runtime_state.lock:
+        geojson = runtime_state.shapefile_overlay_cache.get("geojson")
     if geojson is None:
         raise HTTPException(status_code=404, detail="Overlay shapefile no disponible")
     return Response(content=json.dumps(geojson), media_type="application/geo+json")
+
+
+@router.get("/overlay/vector.geojson")
+def overlay_vector_geojson():
+    return overlay_shapefile_geojson()
 
 
 @router.post("/overlay/shapefile")
 async def overlay_shapefile(file: UploadFile = File(None), archivo: UploadFile = File(None)):
     upload = file or archivo
     if upload is None:
-        raise HTTPException(status_code=400, detail="Debes enviar un archivo .zip, .geojson o .json")
-    if not upload.filename:
-        raise HTTPException(status_code=400, detail="El archivo no tiene nombre")
-
-    nombre = upload.filename.lower()
-    ext = os.path.splitext(nombre)[1]
-    if ext not in {".zip", ".geojson", ".json"}:
-        raise HTTPException(status_code=400, detail="El archivo debe ser .zip, .geojson o .json")
-
+        raise HTTPException(status_code=400, detail="Debes enviar un archivo .zip, .kml, .kmz, .geojson o .json")
     try:
-        contenido = await upload.read()
-        if not contenido:
-            raise HTTPException(status_code=400, detail="El archivo esta vacio")
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            ruta_vector = None
-            if ext == ".zip":
-                ruta_zip = os.path.join(tmpdir, "overlay.zip")
-                with open(ruta_zip, "wb") as f:
-                    f.write(contenido)
-                with zipfile.ZipFile(ruta_zip, "r") as zf:
-                    zf.extractall(tmpdir)
-                ruta_vector, _ = _buscar_archivo_vectorial_extraido(tmpdir)
-                if ruta_vector is None:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="El ZIP debe incluir un shapefile (.shp + .dbf + .shx) o un GeoJSON",
-                    )
-            else:
-                ruta_vector = os.path.join(tmpdir, upload.filename)
-                with open(ruta_vector, "wb") as f:
-                    f.write(contenido)
-
-            geojson, bounds = _cargar_overlay_shapefile_desde_ruta(ruta_vector)
-            cache = _sincronizar_overlay_shapefile(geojson=geojson, bounds=bounds, nombre=upload.filename)
-
-        runtime.push_log(f"Overlay vectorial cargado: {upload.filename}")
-        return {
-            "ok": True,
-            "mensaje": "Shapefile cargado y visible como overlay",
-            "bounds": cache.get("bounds"),
-            "cache_buster": cache.get("cache_buster"),
-            "nombre": cache.get("nombre"),
-        }
+        return await cargar_y_sincronizar_desde_upload(upload)
     finally:
         await upload.close()
 
 
+@router.post("/overlay/vector")
+async def overlay_vector(file: UploadFile = File(None), archivo: UploadFile = File(None)):
+    return await overlay_shapefile(file=file, archivo=archivo)
+
+
 @router.get("/tiles/rgb/{z}/{x}/{y}.png")
 def tile_rgb(z: int, x: int, y: int):
-    if z < 0 or z > runtime.MAX_TILE_ZOOM:
+    if z < 0 or z > runtime_state.MAX_TILE_ZOOM:
         raise HTTPException(status_code=400, detail="Zoom invalido")
     if x < 0 or y < 0 or x >= 2**z or y >= 2**z:
         raise HTTPException(status_code=400, detail="Coordenadas de tile invalidas")
@@ -188,7 +184,7 @@ def tile_rgb(z: int, x: int, y: int):
 @router.get("/ingesta/estado")
 def estado_ingesta():
     archivos, imagenes_validas = _contar_imagenes_en_directorio()
-    info = runtime.snapshot_ingesta_info()
+    info = runtime_state.snapshot_ingesta_info()
     return {
         "ok": True,
         "mensaje": "Estado de dataset",
@@ -201,32 +197,32 @@ def estado_ingesta():
         "puntos_gps": info.get("puntos_gps", []),
         "centro_gps": info.get("centro_gps"),
         "nombre_proyecto": info.get("nombre_proyecto") or "test_agisoft",
-        "camera_model": info.get("camera_model") or "mavic_3m",
+        "camera_model": info.get("camera_model") or "mavic_3_rgb",
     }
 
 
 @router.post("/proyecto/nombre")
 def guardar_nombre_proyecto(nombre: str = Form(...)):
-    nombre_limpio = runtime.sanitizar_nombre_proyecto(nombre)
-    runtime.update_ingesta_info(nombre_proyecto=nombre_limpio)
-    runtime.update_state(message=f"Nombre de proyecto guardado: {nombre_limpio}")
+    nombre_limpio = runtime_state.sanitizar_nombre_proyecto(nombre)
+    runtime_state.update_ingesta_info(nombre_proyecto=nombre_limpio)
+    runtime_state.update_state(message=f"Nombre de proyecto guardado: {nombre_limpio}")
     return {"ok": True, "mensaje": "Nombre de proyecto guardado", "nombre_proyecto": nombre_limpio}
 
 
 @router.post("/proyecto/nuevo")
 def nuevo_proyecto(nombre: str = Form(None), camera_model: str = Form(None)):
-    with runtime.lock:
-        if runtime.state.get("running"):
+    with runtime_state.lock:
+        if runtime_state.state.get("running"):
             raise HTTPException(status_code=409, detail="No puedes reiniciar mientras hay un proceso en ejecucion")
 
-    runtime.limpiar_salidas_proyecto()
-    runtime.reset_runtime_state()
+    runtime_state.limpiar_salidas_proyecto()
+    runtime_state.reset_runtime_state()
 
-    nombre_limpio = runtime.sanitizar_nombre_proyecto(nombre) if nombre else runtime.DEFAULT_INGESTA_INFO["nombre_proyecto"]
-    modelo_limpio = runtime.normalizar_modelo_camara(camera_model) if camera_model else runtime.DEFAULT_INGESTA_INFO["camera_model"]
+    nombre_limpio = runtime_state.sanitizar_nombre_proyecto(nombre) if nombre else runtime_state.DEFAULT_INGESTA_INFO["nombre_proyecto"]
+    modelo_limpio = runtime_state.normalizar_modelo_camara(camera_model) if camera_model else runtime_state.DEFAULT_INGESTA_INFO["camera_model"]
 
-    runtime.update_ingesta_info(nombre_proyecto=nombre_limpio, camera_model=modelo_limpio)
-    runtime.update_state(message="Nuevo proyecto listo")
+    runtime_state.update_ingesta_info(nombre_proyecto=nombre_limpio, camera_model=modelo_limpio)
+    runtime_state.update_state(message="Nuevo proyecto listo")
     return {
         "ok": True,
         "mensaje": "Proyecto reiniciado",
@@ -260,11 +256,18 @@ async def ingesta_zip(file: UploadFile = File(None), archivo: UploadFile = File(
 
 @router.post("/ingesta/drive")
 def ingesta_drive(url: str = Form(...)):
-    zip_buffer = _descargar_zip_drive(url)
-    total_archivos, imagenes_validas = _extraer_zip_a_dataset(zip_buffer)
+    if _es_ruta_rclone(url):
+        total_archivos, imagenes_validas = _descargar_carpeta_rclone(url)
+    else:
+        _file_id, es_carpeta = _extraer_id_drive(url)
+        if es_carpeta:
+            total_archivos, imagenes_validas = _descargar_carpeta_drive(url)
+        else:
+            zip_buffer = _descargar_zip_drive(url)
+            total_archivos, imagenes_validas = _extraer_zip_a_dataset(zip_buffer)
     return {
         "ok": True,
-        "mensaje": "ZIP de Drive descargado y extraido en dataset/",
+        "mensaje": "Carpeta o ZIP de Drive descargado y extraido en dataset/",
         "total_archivos": total_archivos,
         "imagenes_validas": imagenes_validas,
     }
@@ -272,7 +275,7 @@ def ingesta_drive(url: str = Form(...)):
 
 @router.get("/procesar")
 def procesar():
-    return runtime.serve_frontend_index()
+    return serve_frontend_index()
 
 
 @router.post("/procesar")
@@ -290,6 +293,23 @@ def stop():
     return detener_proceso()
 
 
+@router.post("/overlay/contours/generate")
+def generate_contours(payload: dict | None = None):
+    payload = payload or {}
+    return iniciar_curvas_nivel(
+        intervalo_m=payload.get("intervalo_m", 5),
+        intervalo_maestra_m=payload.get("intervalo_maestra_m", 25),
+    )
+
+
+@router.delete("/overlay/contours")
+def delete_contours():
+    try:
+        return eliminar_curvas_nivel()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get("/config.js", include_in_schema=False)
 def config_js():
     api_base = os.environ.get("API_BASE_URL", "")
@@ -301,7 +321,7 @@ def config_js():
 
 @router.get("/{requested_path:path}", include_in_schema=False)
 def frontend_fallback(requested_path: str):
-    ruta = runtime._frontend_dist_path(requested_path)
+    ruta = frontend_dist_path(requested_path)
     if ruta and os.path.isfile(ruta):
         return FileResponse(ruta)
-    return runtime.serve_frontend_index()
+    return serve_frontend_index()

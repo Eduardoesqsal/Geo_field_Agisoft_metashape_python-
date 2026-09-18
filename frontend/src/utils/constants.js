@@ -1,0 +1,1 @@
+export const DEFAULT_CENTER = [23.6345, -102.5528]
