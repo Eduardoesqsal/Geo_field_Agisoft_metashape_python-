@@ -1,4 +1,4 @@
-export const API_BASE = window.API_BASE || ''
+export const API_BASE = ''
 
 export function apiJson(path, options = {}) {
   return fetch(`${API_BASE}${path}`, options).then(async (response) => {

@@ -594,10 +594,6 @@ export default function App() {
   const [intervaloCurvaDelgada, setIntervaloCurvaDelgada] = useState(5)
   const [intervaloCurvaMaestra, setIntervaloCurvaMaestra] = useState(25)
   const [panelOpen, setPanelOpen] = useState(window.innerWidth > 760)
-  const [workersModalOpen, setWorkersModalOpen] = useState(false)
-  const [workers, setWorkers] = useState([])
-  const [workersLoading, setWorkersLoading] = useState(false)
-  const [workersError, setWorkersError] = useState(null)
   const zipInputRef = useRef(null)
   const vectorInputRef = useRef(null)
 
@@ -610,7 +606,6 @@ export default function App() {
   const finalMode = Boolean(status?.step === 'finalizado' && !status?.running)
   const processingPercent = processingProgress(status)
   const points = ingesta?.puntos_gps || []
-  const availableWorkers = workers.filter((worker) => worker.status === 'AVAILABLE').length
   const metrics = useMemo(
     () => [
       { label: 'Estado', value: status?.running ? 'Ejecutando' : status?.step || '-', icon: 'activity' },
@@ -623,7 +618,6 @@ export default function App() {
       { label: 'Orto RGB', value: overlay?.disponible ? 'Listo' : 'No disponible', icon: 'mapPinned' },
       { label: 'Orto MS', value: overlay?.disponible_ms ? 'Listo' : 'No disponible', icon: 'layers' },
       { label: 'Vector', value: vectorOverlay?.disponible ? 'Listo' : 'No disponible', icon: 'map' },
-      { label: 'Workers', value: `${availableWorkers}/${workers.length}`, icon: 'monitor' },
       {
         label: 'Curvas',
         value: curvasNivel?.disponible
@@ -632,24 +626,8 @@ export default function App() {
         icon: 'chart',
       },
     ],
-    [status, ingesta, overlay, vectorOverlay, curvasNivel, points.length, availableWorkers, workers.length],
+    [status, ingesta, overlay, vectorOverlay, curvasNivel, points.length],
   )
-
-  const refreshWorkers = async () => {
-    setWorkersLoading(true)
-    setWorkersError(null)
-    try {
-      const data = await apiJson('/api/distributed/workers')
-      const orderedWorkers = [...(data.workers || [])].sort((a, b) =>
-        String(a.worker_id || '').localeCompare(String(b.worker_id || '')),
-      )
-      setWorkers(orderedWorkers)
-    } catch (error) {
-      setWorkersError(error.message || 'No se pudieron leer las computadoras')
-    } finally {
-      setWorkersLoading(false)
-    }
-  }
 
   const refreshAll = async () => {
     setRefreshing(true)
@@ -682,13 +660,6 @@ export default function App() {
     const timer = setInterval(refreshAll, 3500)
     return () => clearInterval(timer)
   }, [])
-
-  useEffect(() => {
-    if (!workersModalOpen) return undefined
-    refreshWorkers()
-    const timer = setInterval(refreshWorkers, 5000)
-    return () => clearInterval(timer)
-  }, [workersModalOpen])
 
   const showMessage = (kind, text) => {
     setNotice({ kind, text })
@@ -930,39 +901,6 @@ export default function App() {
     } catch (error) {
       showMessage('error', error.message || 'No se pudieron eliminar las curvas')
     }
-  }
-
-  const openWorkersModal = () => {
-    setWorkersModalOpen(true)
-    refreshWorkers()
-  }
-
-  const sendWorkerTest = async (workerId) => {
-    try {
-      const data = await apiJson(`/api/distributed/workers/${encodeURIComponent(workerId)}/test-job`, {
-        method: 'POST',
-      })
-      showMessage('success', data.message || `Mensaje enviado a ${workerId}`)
-      await refreshWorkers()
-    } catch (error) {
-      showMessage('error', error.message || `No se pudo probar ${workerId}`)
-    }
-  }
-
-  const workerStatusLabel = (worker) => {
-    const statusValue = worker?.status || 'OFFLINE'
-    if (statusValue === 'AVAILABLE') return 'Disponible'
-    if (statusValue === 'BUSY') return 'Ocupada'
-    if (statusValue === 'ERROR') return 'Error'
-    return 'Offline'
-  }
-
-  const workerStatusClass = (worker) => {
-    const statusValue = worker?.status || 'OFFLINE'
-    if (statusValue === 'AVAILABLE') return 'available'
-    if (statusValue === 'BUSY') return 'busy'
-    if (statusValue === 'ERROR') return 'error'
-    return 'offline'
   }
 
   return (
@@ -1264,10 +1202,6 @@ export default function App() {
                   <span className="round-action-icon"><Icon name="refresh" /></span>
                   <span>Actualizar</span>
                 </button>
-                <button className="round-action" onClick={openWorkersModal}>
-                  <span className="round-action-icon"><Icon name="monitor" /></span>
-                  <span>Workers</span>
-                </button>
                 <button className="round-action is-warning" onClick={stopProcess} disabled={!status?.running}>
                   <span className="round-action-icon"><Icon name="stop" /></span>
                   <span>Detener</span>
@@ -1350,70 +1284,6 @@ export default function App() {
           </section>
         </div>
       </aside>
-
-      {workersModalOpen ? (
-        <div className="modal-layer" role="dialog" aria-modal="true" aria-label="Computadoras disponibles">
-          <div className="modal-backdrop" onClick={() => setWorkersModalOpen(false)} />
-          <section className="workers-modal">
-            <div className="modal-head">
-              <div>
-                <h2>
-                  <Icon name="monitor" />
-                  Computadoras
-                </h2>
-                <span>{availableWorkers} disponibles de {workers.length} conectadas</span>
-              </div>
-              <div className="modal-actions">
-                <button className="secondary" onClick={refreshWorkers} disabled={workersLoading}>
-                  <Icon name="refresh" />
-                  Actualizar
-                </button>
-                <button className="icon-button" onClick={() => setWorkersModalOpen(false)} aria-label="Cerrar">
-                  <Icon name="x" />
-                </button>
-              </div>
-            </div>
-
-            {workersError ? <div className="notice error">{workersError}</div> : null}
-
-            <div className="workers-grid">
-              {workers.length ? (
-                workers.map((worker) => (
-                  <article className={`worker-card ${workerStatusClass(worker)}`} key={worker.worker_id}>
-                    <div className="worker-main">
-                      <span className="worker-icon"><Icon name="monitor" /></span>
-                      <div>
-                        <h3>{worker.worker_id || 'Worker'}</h3>
-                        <span>{workerStatusLabel(worker)}</span>
-                      </div>
-                    </div>
-                    <dl className="worker-details">
-                      <div>
-                        <dt>Job actual</dt>
-                        <dd>{worker.current_job || '-'}</dd>
-                      </div>
-                      <div>
-                        <dt>Ultima senal</dt>
-                        <dd>{formatDate(worker.last_seen)}</dd>
-                      </div>
-                    </dl>
-                    <button className="secondary worker-test" onClick={() => sendWorkerTest(worker.worker_id)}>
-                      <Icon name="play" />
-                      Probar conexion
-                    </button>
-                  </article>
-                ))
-              ) : (
-                <div className="workers-empty">
-                  <Icon name="monitor" />
-                  <h3>Sin workers conectados</h3>
-                  <p>Abre iniciar_worker.bat en una PC worker y vuelve a actualizar.</p>
-                </div>
-              )}
-            </div>
-          </section>
-        </div>
-      ) : null}
     </div>
   )
 }

@@ -310,15 +310,6 @@ def delete_contours():
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/config.js", include_in_schema=False)
-def config_js():
-    api_base = os.environ.get("API_BASE_URL", "")
-    return Response(
-        content=f'window.API_BASE = {json.dumps(api_base)};\n',
-        media_type="application/javascript",
-    )
-
-
 @router.get("/{requested_path:path}", include_in_schema=False)
 def frontend_fallback(requested_path: str):
     ruta = frontend_dist_path(requested_path)
