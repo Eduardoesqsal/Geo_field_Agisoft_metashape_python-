@@ -55,7 +55,7 @@ def reader_loop(proc, task="pipeline"):
             message = (
                 "Curvas de nivel generadas"
                 if task == "contours"
-                else "Agisoft finalizado. Ortomosaicos y DEM RGB de suelo/sin clasificar listos"
+                else "Agisoft finalizado. Ortomosaicos y DEM RGB/MS completos y clasificados listos"
             )
             runtime_state.update_state(step="finalizado", message=message)
             runtime_state.push_log("Proceso finalizado sin errores")

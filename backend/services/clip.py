@@ -77,8 +77,10 @@ def recortar_ortomosaico(ruta, limite=CLIP_GEOJSON):
                     datos = origen.read(window=entrada)
                     relleno = origen.nodata if origen.nodata is not None else 0
                     datos[:, ~valido] = relleno
-                    # La ultima banda de los ortomosaicos de Metashape es Alpha.
-                    if origen.count in (4, 5):
+                    # Solo la banda Alpha explicita es transparencia. En el
+                    # ortomosaico Mavic 3M de cuatro bandas, la ultima es NIR.
+                    if (origen.colorinterp[-1] == rasterio.enums.ColorInterp.alpha
+                            or (origen.descriptions[-1] or "").strip().lower() == "alpha"):
                         datos[-1, ~valido] = 0
                     destino.write(datos, window=salida)
                     destino.write_mask(np.where(valido, 255, 0).astype("uint8"), window=salida)

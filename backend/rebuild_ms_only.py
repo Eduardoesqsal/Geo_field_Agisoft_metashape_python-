@@ -1,6 +1,7 @@
-"""Calibra MS y reconstruye solo su ortomosaico desde un proyecto existente.
+"""Calibra MS y reconstruye su ortomosaico con el DEM propio.
 
-No guarda el proyecto original ni repite alineacion, nube de puntos o DEM.
+Usa la misma construccion de ortomosaico que RGB. No guarda el proyecto
+original ni repite alineacion, nube de puntos o DEM.
 Uso: metashape.exe -r backend/rebuild_ms_only.py proyecto.psx salida.tif [resolucion_m]
 """
 
@@ -23,12 +24,12 @@ def main():
 
     proyecto = pathlib.Path(sys.argv[1]).resolve()
     salida = pathlib.Path(sys.argv[2]).resolve()
-    resolucion = float(sys.argv[3]) if len(sys.argv) == 4 else 0.25
+    resolucion = float(sys.argv[3]) if len(sys.argv) == 4 else None
     if not proyecto.is_file() or proyecto.suffix.lower() not in (".psx", ".psz"):
         raise RuntimeError(f"No se encontro el proyecto: {proyecto}")
     if salida.exists():
         raise RuntimeError(f"La salida ya existe: {salida}")
-    if resolucion <= 0:
+    if resolucion is not None and resolucion <= 0:
         raise ValueError("La resolucion debe ser positiva y estar en metros")
 
     app = ProcesamientoMetashape(camera_model="mavic_3m")
@@ -42,6 +43,13 @@ def main():
     )
     if chunk is None or getattr(chunk, "elevation", None) is None:
         raise RuntimeError("El proyecto necesita un chunk MS con DEM existente")
+    dem_ms = next(
+        (item for item in chunk.elevations
+         if (getattr(item, "label", "") or "").strip() == "DEM - Suelo clasificado (Ground)"),
+        None,
+    )
+    if dem_ms is None:
+        raise RuntimeError("El chunk MS no contiene su DEM de suelo clasificado")
 
     for sensor in chunk.sensors:
         sensor.normalize_sensitivity = True
@@ -49,40 +57,40 @@ def main():
     chunk.calibrateReflectance(use_reflectance_panels=False, use_sun_sensor=True)
 
     elevacion = app._enum("DataSource.ElevationData", "ElevationData")
-    promedio = app._enum("BlendingMode.AverageBlending", "AverageBlending")
-    if elevacion is None or promedio is None:
+    if elevacion is None:
         raise RuntimeError("Esta version de Metashape no permite construir el ortomosaico requerido")
-    proyeccion, epsg = app._proyeccion_utm_ms(chunk)
     claves_anteriores = {item.key for item in chunk.orthomosaics}
-    print(f"Reconstruyendo solo ortomosaico MS a {resolucion:g} m/pixel", flush=True)
-    chunk.buildOrthomosaic(
-        surface_data=elevacion,
-        blending_mode=promedio,
-        fill_holes=True,
-        projection=proyeccion,
-        resolution=resolucion,
-        replace_asset=False,
-    )
+    print("Reconstruyendo ortomosaico MS con su DEM de suelo", flush=True)
+    dem_anterior = chunk.elevation
+    chunk.elevation = dem_ms
+    try:
+        chunk.buildOrthomosaic(surface_data=elevacion, replace_asset=False)
+    finally:
+        chunk.elevation = dem_anterior
     nuevos = [item for item in chunk.orthomosaics if item.key not in claves_anteriores]
     if not nuevos:
         raise RuntimeError("Metashape no creo un ortomosaico nuevo")
 
-    opciones, _ = app._opciones_exportacion_ms(chunk)
+    opciones, epsg = app._opciones_exportacion_ms(chunk)
     fuente = app._enum("DataSource.OrthomosaicData", "OrthomosaicData")
     if fuente is None:
         raise RuntimeError("Metashape no reconoce OrthomosaicData")
     salida.parent.mkdir(parents=True, exist_ok=True)
     print(f"Exportando: {salida}", flush=True)
+    fuente_ms = str(salida) + ".metashape_raw.tif"
     chunk.exportRaster(
-        path=str(salida),
+        path=fuente_ms,
         source_data=fuente,
         asset=nuevos[-1].key,
-        resolution=resolucion,
         save_alpha=True,
         white_background=False,
+        **({"resolution": resolucion} if resolucion is not None else {}),
         **opciones,
     )
-    app._verificar_exportacion_ms(str(salida), epsg, radiometric_correction="sun_sensor")
+    app._verificar_exportacion_ms(
+        fuente_ms, epsg, radiometric_correction="sun_sensor",
+        expected_resolution=resolucion, destino=str(salida)
+    )
     print(f"Terminado sin guardar cambios en {proyecto}", flush=True)
 
 

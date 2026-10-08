@@ -1,4 +1,5 @@
 import os
+import time
 from collections import defaultdict
 
 import numpy as np
@@ -6,6 +7,7 @@ from PIL import Image
 
 try:
     import rasterio
+    from rasterio.enums import ColorInterp, Resampling
 except Exception:
     rasterio = None
 
@@ -24,8 +26,7 @@ from backend.core.paths import CLIP_GEOJSON
 class ProcesamientoMetashape:
     REDEDGE_RGB_STRETCH = (2, 98)
     REDEDGE_RGB_GAMMA = 1.15
-    DEPTH_MAP_DOWNSCALE = 4
-    MAVIC_3M_ORTHO_RESOLUTION_M = 0.04
+    DEPTH_MAP_DOWNSCALE = 2
     # Perfil conservador: prioriza un MDT limpio aunque deje huecos que
     # Metashape deba interpolar. Todos los valores estan expresados en las
     # unidades que usa classifyGroundPoints (grados y metros).
@@ -218,20 +219,14 @@ class ProcesamientoMetashape:
     def alinear_camaras(self):
         self._log("[2/5] Alineando camaras")
         Metashape = self._ms()
-        accuracy = self._enum(
-            "Accuracy.LowAccuracy",
-            "LowAccuracy",
-            "Accuracy.Low",
-        )
         for chunk in self._obtener_chunks():
             if not chunk.cameras:
                 continue
             kwargs = {
+                "downscale": 1,
                 "generic_preselection": True,
                 "reference_preselection": True,
             }
-            if accuracy is not None:
-                kwargs["accuracy"] = accuracy
             chunk.matchPhotos(**kwargs)
             chunk.alignCameras()
             try:
@@ -290,7 +285,7 @@ class ProcesamientoMetashape:
             raise RuntimeError("La version de Metashape no admite un MDT filtrado por clase Ground")
 
         for chunk in self._obtener_chunks():
-            if not chunk.cameras or (getattr(chunk, "label", "") or "").strip().lower() != "rgb":
+            if not chunk.cameras or (getattr(chunk, "label", "") or "").strip().lower() not in {"rgb", "ms"}:
                 continue
             etiqueta = getattr(chunk, "label", "chunk")
             if not self._tiene_nube_de_puntos(chunk):
@@ -372,7 +367,6 @@ class ProcesamientoMetashape:
 
     def construir_ortomosaico(self):
         self._log("[4/5] Construyendo ortomosaico")
-        Metashape = self._ms()
         elevation_data = self._enum("DataSource.ElevationData", "ElevationData")
         model_data = self._enum("DataSource.ModelData", "ModelData")
         chunk_rgb = next(
@@ -384,6 +378,15 @@ class ProcesamientoMetashape:
             if not chunk.cameras:
                 continue
             etiqueta = (getattr(chunk, "label", "") or "").strip().lower()
+            if etiqueta == "ms" and self.camera_model == "mavic_3m":
+                dem_ms = getattr(chunk, "elevation", None)
+                if elevation_data is None or dem_ms is None or getattr(dem_ms, "label", "") != "DEM - Suelo clasificado (Ground)":
+                    raise RuntimeError("El ortomosaico MS necesita su propio DEM de suelo clasificado")
+                # Igual que RGB: el DEM activo del mismo chunk es la superficie
+                # y Metashape decide el mosaico y la resolucion nativa.
+                chunk.buildOrthomosaic(surface_data=elevation_data)
+                self._log("[4/5] Ortofoto construida con DEM MS propio: MS")
+                continue
             if etiqueta == "ms":
                 if chunk_rgb is None or not os.path.isfile(RUTA_DEM_SUELO):
                     raise RuntimeError("El ortomosaico MS requiere fotos RGB para usar su DEM de suelo")
@@ -394,6 +397,7 @@ class ProcesamientoMetashape:
                     "raster_type": elevation_data,
                     "nodata_value": -32767,
                     "has_nodata_value": True,
+                    "replace_asset": False,
                 }
                 if getattr(chunk_rgb, "crs", None) is not None:
                     opciones_importacion["crs"] = chunk_rgb.crs
@@ -401,20 +405,6 @@ class ProcesamientoMetashape:
                 if getattr(chunk, "elevation", None) is None:
                     raise RuntimeError("No se pudo activar el DEM RGB en el chunk MS")
                 self._log("[4/5] DEM RGB importado en MS para construir el ortomosaico")
-            if etiqueta == "ms" and self.camera_model == "mavic_3m":
-                promedio = self._enum("BlendingMode.AverageBlending", "AverageBlending")
-                if elevation_data is None or getattr(chunk, "elevation", None) is None or promedio is None:
-                    raise RuntimeError("El ortomosaico MS necesita un DEM y el modo AverageBlending")
-                proyeccion, epsg = self._proyeccion_utm_ms(chunk)
-                chunk.buildOrthomosaic(
-                    surface_data=elevation_data,
-                    blending_mode=promedio,
-                    fill_holes=True,
-                    projection=proyeccion,
-                    resolution=self.MAVIC_3M_ORTHO_RESOLUTION_M,
-                )
-                self._log(f"[4/5] Ortomosaico MS calibrado en EPSG:{epsg}: {etiqueta}")
-                continue
             try:
                 kwargs = {}
                 if elevation_data is not None:
@@ -477,45 +467,116 @@ class ProcesamientoMetashape:
             "nodata_value": -10000,
         }, epsg
 
-    def _verificar_exportacion_ms(self, ruta, epsg, radiometric_correction=None):
+    def _verificar_exportacion_ms(self, ruta, epsg, radiometric_correction=None, expected_resolution=None, destino=None):
         if rasterio is None:
             raise RuntimeError("Se necesita rasterio para verificar el TIFF MS exportado")
-        with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=True), rasterio.open(ruta, "r+") as src:
-            if src.count != 5 or src.dtypes[0] != "float32" or src.crs is None or src.crs.to_epsg() != epsg:
-                raise RuntimeError(
-                    f"TIFF MS inesperado: {src.count} bandas, {src.dtypes[0]}, {src.crs}; "
-                    "se esperaban 5 bandas float32 en UTM"
-                )
-            # La banda Alpha de Metashape puede valer 0 fuera del mosaico
-            # mientras GDAL considera validos todos los pixeles si no hay NoData.
-            # Escribimos NoData en las cuatro bandas espectrales para que
-            # masked=True descarte esas celdas; Alpha conserva 0/1. La mascara
-            # interna tambien corrige dataset_mask(), que algunas apps usan.
-            for _, ventana in src.block_windows(5):
-                alpha = src.read(5, window=ventana)
-                sin_datos = ~np.isfinite(alpha) | (alpha <= 0)
-                src.write_mask(np.where(sin_datos, 0, 255).astype(np.uint8), window=ventana)
-                if not np.any(sin_datos):
-                    continue
-                bandas = src.read([1, 2, 3, 4], window=ventana)
-                bandas[:, sin_datos] = -10000
-                src.write(bandas, indexes=[1, 2, 3, 4], window=ventana)
-            src.nodata = -10000
-            nombres = ("Green", "Red", "Red edge", "NIR", "Alpha")
-            longitudes = (560, 650, 730, 860)
-            anchos = (16, 16, 16, 26)
-            for indice, nombre in enumerate(nombres, 1):
-                src.set_band_description(indice, nombre)
-                if indice <= 4:
-                    src.update_tags(
-                        indice,
-                        CentralWavelength=str(longitudes[indice - 1]),
-                        WavelengthFWHM=str(anchos[indice - 1]),
+        nombres = ("Green", "Red", "Red edge", "NIR")
+        longitudes = (560, 650, 730, 860)
+        anchos = (16, 16, 16, 26)
+        destino = destino or ruta
+        temporal = f"{destino}.tmp.tif"
+        publicado = False
+        try:
+            with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=True), rasterio.open(ruta) as src:
+                if src.count != 5 or src.dtypes[0] != "float32" or src.crs is None or src.crs.to_epsg() != epsg:
+                    raise RuntimeError(
+                        f"TIFF MS inesperado: {src.count} bandas, {src.dtypes[0]}, {src.crs}; "
+                        "se esperaban 4 bandas de reflectancia y Alpha en UTM"
                     )
-            src.update_tags(
-                RadiometricCorrection=radiometric_correction or "not_applied",
-                RadiometricScale="B1-B4 / 32768",
-            )
+                if expected_resolution is not None and any(
+                    abs(valor - expected_resolution) > expected_resolution * 0.1 for valor in src.res
+                ):
+                    raise RuntimeError(
+                        f"El TIFF MS tiene resolucion {src.res} m/pixel; se esperaba {expected_resolution:g}"
+                    )
+                alto = min(src.height, 512)
+                ancho = min(src.width, 512)
+                muestra = src.read(out_shape=(5, alto, ancho), resampling=Resampling.nearest)
+                huella = np.isfinite(muestra[4]) & (muestra[4] > 0)
+                if not np.any(huella):
+                    raise RuntimeError("El TIFF MS no contiene pixeles dentro de su huella")
+                espectrales = muestra[:4]
+                validos = np.isfinite(espectrales).all(axis=0) & (espectrales > 0).all(axis=0)
+                if np.count_nonzero(huella & validos) / np.count_nonzero(huella) < 0.99:
+                    raise RuntimeError("El TIFF MS tiene huecos en las bandas; los indices quedarian incompletos")
+
+                perfil = src.profile.copy()
+                perfil.update(
+                    driver="GTiff", count=5, dtype="float32", nodata=-10000,
+                    compress="lzw", predictor=3, tiled=True,
+                    blockxsize=256, blockysize=256, BIGTIFF="IF_SAFER",
+                )
+                perfil.pop("photometric", None)
+                with rasterio.open(temporal, "w", **perfil) as orto:
+                    # PIX4Dfields reconoce cuatro bandas espectrales y Alpha
+                    # como una quinta banda, igual que su GeoTIFF de referencia.
+                    for _, ventana in orto.block_windows(1):
+                        datos = src.read(window=ventana)
+                        huella = np.isfinite(datos[4]) & (datos[4] > 0)
+                        datos[:, ~huella] = -10000
+                        datos[4, huella] = 255
+                        orto.write(datos, window=ventana)
+                    orto.colorinterp = (
+                        ColorInterp.green, ColorInterp.red,
+                        ColorInterp.undefined, ColorInterp.undefined,
+                        ColorInterp.alpha,
+                    )
+                    metadatos = {
+                        "RadiometricCorrection": radiometric_correction or "not_applied",
+                        "RadiometricScale": "B1-B4 / 32768",
+                        "BandOrder": "Green,Red,RedEdge,NIR,Alpha",
+                        "VegetationIndices": "NDVI=(NIR-Red)/(NIR+Red); NDRE=(NIR-RedEdge)/(NIR+RedEdge); GNDVI=(NIR-Green)/(NIR+Green)",
+                    }
+                    orto.update_tags(**metadatos)
+                    for indice, (nombre, longitud, ancho_banda) in enumerate(zip(nombres, longitudes, anchos), 1):
+                        tags = {
+                            "BandName": nombre,
+                            "CentralWavelength": str(longitud),
+                            "WavelengthFWHM": str(ancho_banda),
+                        }
+                        orto.set_band_description(indice, nombre)
+                        orto.update_tags(indice, **tags)
+                    orto.set_band_description(5, "Alpha")
+                    factores = []
+                    factor = 2
+                    while min(src.width, src.height) // factor >= 256:
+                        factores.append(factor)
+                        factor *= 2
+                    if factores:
+                        orto.build_overviews(factores, Resampling.average)
+                        orto.update_tags(ns="rio_overview", resampling="average")
+            for intento in range(5):
+                try:
+                    os.replace(temporal, destino)
+                    publicado = True
+                    break
+                except PermissionError as exc:
+                    if intento == 4:
+                        raise PermissionError(
+                            f"No se pudo publicar el GeoTIFF MS en {destino}. "
+                            f"Cierra el archivo en QGIS u otro programa e intenta de nuevo. "
+                            f"El GeoTIFF de cuatro bandas quedo disponible en {temporal}"
+                        ) from exc
+                    time.sleep(1)
+            if ruta != destino:
+                for sobrante in (ruta, f"{ruta}.aux.xml"):
+                    try:
+                        os.remove(sobrante)
+                    except FileNotFoundError:
+                        pass
+                    except PermissionError:
+                        self._log(f"[5/5] No se pudo borrar el archivo temporal ocupado: {sobrante}")
+            # Un PAM XML anterior puede describir bandas de otra exportacion.
+            auxiliar_viejo = f"{destino}.aux.xml"
+            try:
+                os.remove(auxiliar_viejo)
+            except FileNotFoundError:
+                pass
+            except PermissionError:
+                self._log(f"[5/5] Cierra en QGIS y elimina el metadato anterior: {auxiliar_viejo}")
+        finally:
+            if publicado and os.path.exists(temporal):
+                os.remove(temporal)
 
     def exportar_resultado(self):
         self._log("[5/5] Exportando resultado")
@@ -609,18 +670,20 @@ class ProcesamientoMetashape:
                     )
                     self._log(f"[5/5] ROI cargado en Metashape como limite exterior: {etiqueta.upper()}")
                 opciones_ms, epsg_ms = self._opciones_exportacion_ms(chunk) if etiqueta == "ms" else ({}, None)
-                if etiqueta == "ms" and self.camera_model == "mavic_3m":
-                    opciones_ms["resolution"] = self.MAVIC_3M_ORTHO_RESOLUTION_M
+                fuente_ms = f"{destino}.metashape_raw.tif" if etiqueta == "ms" and self.camera_model == "mavic_3m" else destino
                 exportado = _exportar_chunk(
                     chunk,
-                    destino,
+                    fuente_ms,
                     save_alpha=True,
                     white_background=False,
                     opciones=opciones_ms,
                 )
 
                 if etiqueta == "ms" and exportado and self.camera_model == "mavic_3m":
-                    self._verificar_exportacion_ms(destino, epsg_ms, radiometric_correction="sun_sensor")
+                    self._verificar_exportacion_ms(
+                        fuente_ms, epsg_ms, radiometric_correction="sun_sensor", destino=destino
+                    )
+                    self._log("[5/5] MS: GeoTIFF con 4 bandas Green/Red/RedEdge/NIR y Alpha")
 
                 if etiqueta == "rgb" and exportado and not self._raster_tiene_datos_utiles(destino):
                     self._log("[5/5] El TIFF RGB salio vacio; reintentando exportacion sin compresion")
@@ -638,10 +701,12 @@ class ProcesamientoMetashape:
                     exportados.append(destino)
                     if usar_roi:
                         self._log(f"[5/5] Ortomosaico {etiqueta.upper()} recortado por Metashape: {destino}")
-                    self._log(f"[5/5] Exportado (con canal alfa): {destino}")
+                    self._log(f"[5/5] Exportado: {destino}")
                 else:
                     self._log(f"[5/5] No se pudo exportar {etiqueta or 'chunk'}: sin exportador compatible")
             except Exception as exc:
+                if etiqueta != "ms" or self.camera_model != "mavic_3m":
+                    _borrar_si_existe(destino)
                 self._log(f"[5/5] No se pudo exportar {etiqueta or 'chunk'}: {exc}")
                 raise
 

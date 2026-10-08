@@ -24,12 +24,12 @@ def main():
 
     proyecto = pathlib.Path(argumentos[0]).resolve()
     salida = pathlib.Path(argumentos[1]).resolve()
-    resolucion = float(argumentos[2]) if len(argumentos) == 3 else 0.25
+    resolucion = float(argumentos[2]) if len(argumentos) == 3 else None
     if not proyecto.is_file() or proyecto.suffix.lower() not in (".psx", ".psz"):
         raise RuntimeError(f"No se encontro un proyecto Metashape valido: {proyecto}")
     if salida.exists():
         raise RuntimeError(f"La salida ya existe; elige otro nombre: {salida}")
-    if resolucion <= 0:
+    if resolucion is not None and resolucion <= 0:
         raise ValueError("La resolucion debe ser positiva y estar en metros")
 
     app = ProcesamientoMetashape(camera_model="mavic_3m")
@@ -50,16 +50,18 @@ def main():
     if fuente is None:
         raise RuntimeError("Metashape no reconoce OrthomosaicData")
     salida.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Exportando solo MS: {salida} a {resolucion:g} m/pixel", flush=True)
+    texto_resolucion = "nativa" if resolucion is None else f"{resolucion:g} m/pixel"
+    print(f"Exportando solo MS: {salida} a resolucion {texto_resolucion}", flush=True)
+    fuente_ms = str(salida) + ".metashape_raw.tif"
     chunk.exportRaster(
-        path=str(salida),
+        path=fuente_ms,
         source_data=fuente,
-        resolution=resolucion,
         save_alpha=True,
         white_background=False,
+        **({"resolution": resolucion} if resolucion is not None else {}),
         **opciones,
     )
-    app._verificar_exportacion_ms(str(salida), epsg)
+    app._verificar_exportacion_ms(fuente_ms, epsg, expected_resolution=resolucion, destino=str(salida))
     print(f"Exportacion verificada: {salida}", flush=True)
 
 
