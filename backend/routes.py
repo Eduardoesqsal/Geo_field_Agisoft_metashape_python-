@@ -25,9 +25,10 @@ from backend.services.overlay import (
     _ruta_ortomosaico_ms,
     _ruta_ortomosaico_rgb,
 )
-from backend.services.vector_overlay import cargar_y_sincronizar_desde_upload
+from backend.services.vector_overlay import cargar_y_sincronizar_desde_upload, guardar_roi_dibujado, recuperar_recorte_guardado
 from backend.services.contours import eliminar_curvas_nivel, estado_curvas_nivel, geojson_curvas_nivel
 from backend.services.process import detener_proceso, iniciar_curvas_nivel, iniciar_proceso
+from backend.core.paths import CLIP_GEOJSON
 
 router = APIRouter()
 
@@ -114,6 +115,7 @@ def overlay_ms_status():
 
 @router.get("/overlay/shapefile/status")
 def overlay_shapefile_status():
+    recuperar_recorte_guardado()
     with runtime_state.lock:
         disponible = runtime_state.shapefile_overlay_cache.get("geojson") is not None
         bounds = runtime_state.shapefile_overlay_cache.get("bounds")
@@ -133,6 +135,7 @@ def overlay_shapefile_status():
         "superficie_m2": superficie_m2,
         "superficie_ha": superficie_ha,
         "feature_count": feature_count,
+        "recorte_activo": os.path.exists(CLIP_GEOJSON),
     }
 
 
@@ -143,6 +146,7 @@ def overlay_vector_status():
 
 @router.get("/overlay/shapefile.geojson")
 def overlay_shapefile_geojson():
+    recuperar_recorte_guardado()
     with runtime_state.lock:
         geojson = runtime_state.shapefile_overlay_cache.get("geojson")
     if geojson is None:
@@ -158,6 +162,9 @@ def overlay_vector_geojson():
 @router.post("/overlay/shapefile")
 async def overlay_shapefile(file: UploadFile = File(None), archivo: UploadFile = File(None)):
     upload = file or archivo
+    with runtime_state.lock:
+        if runtime_state.state.get("running"):
+            raise HTTPException(status_code=409, detail="Espera a que termine el procesamiento para cambiar el recorte")
     if upload is None:
         raise HTTPException(status_code=400, detail="Debes enviar un archivo .zip, .kml, .kmz, .geojson o .json")
     try:
@@ -169,6 +176,24 @@ async def overlay_shapefile(file: UploadFile = File(None), archivo: UploadFile =
 @router.post("/overlay/vector")
 async def overlay_vector(file: UploadFile = File(None), archivo: UploadFile = File(None)):
     return await overlay_shapefile(file=file, archivo=archivo)
+
+
+@router.post("/overlay/vector/roi")
+def guardar_roi(payload: dict):
+    with runtime_state.lock:
+        if runtime_state.state.get("running"):
+            raise HTTPException(status_code=409, detail="Espera a que termine el procesamiento para cambiar el ROI")
+    return guardar_roi_dibujado(payload.get("coordinates"))
+
+
+@router.delete("/overlay/vector/recorte")
+def quitar_recorte():
+    with runtime_state.lock:
+        if runtime_state.state.get("running"):
+            raise HTTPException(status_code=409, detail="Espera a que termine el procesamiento para quitar el recorte")
+        if os.path.exists(CLIP_GEOJSON):
+            os.remove(CLIP_GEOJSON)
+    return {"ok": True, "mensaje": "Recorte desactivado. Vuelve a procesar para obtener ortomosaicos completos"}
 
 
 @router.get("/tiles/rgb/{z}/{x}/{y}.png")

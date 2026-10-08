@@ -11,6 +11,12 @@ Cada computadora ejecuta su propia copia del proyecto y guarda sus archivos en `
 
 El ejecutable de Metashape se busca en `C:\Program Files\Agisoft\Metashape Pro\metashape.exe`. Si está en otra ruta, define `METASHAPE_EXE` antes de iniciar el servidor.
 
+## Recorte opcional del ortomosaico
+
+Metashape importa el ROI como limite exterior y aplica el recorte durante `exportRaster(clip_to_boundary=True)`; el servidor no reemplaza el TIFF despues de exportarlo.
+
+En **Capa vectorial**, importa un KML con uno o más polígonos o pulsa **Dibujar ROI** y marca al menos tres vértices con clics en el mapa. Después pulsa **Guardar ROI**. Puedes deshacer el último punto o cancelar el dibujo. Al terminar **Procesar**, los TIFF RGB y multiespectral se recortan al área elegida; fuera del polígono queda transparencia y el overlay muestra ese mismo TIFF recortado. **Quitar recorte** desactiva el límite para el siguiente procesamiento. Si no importas KML ni dibujas ROI, los ortomosaicos conservan su extensión completa. Los DEM sin clasificar y de suelo se generan solamente desde las fotos RGB; el ortomosaico multiespectral usa el DEM RGB.
+
 Para desarrollar la interfaz, ejecuta `corepack pnpm dev` dentro de `frontend/` y abre `http://127.0.0.1:5173`. El backend debe estar en marcha en el puerto 8001.
 
 La opción de enlace Drive y la ruta rclone siguen disponibles para importar imágenes; requieren conexión al origen elegido. El procesamiento y los resultados permanecen en la computadora local.

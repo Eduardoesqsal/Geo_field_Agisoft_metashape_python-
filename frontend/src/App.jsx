@@ -1,16 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import L from 'leaflet'
 import { API_BASE, apiJson } from './utils/api'
 import { DEFAULT_CENTER } from './utils/constants'
 import { formatAreaHa, formatDate, processingProgress, stateTone } from './utils/formatters'
 
-function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, vectorVisible, curvasNivel, contourLabelsVisible }) {
+function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, vectorVisible, curvasNivel, contourLabelsVisible, drawingRoi, roiPoints, onRoiPoint }) {
   const mapRef = useRef(null)
   const mapInstanceRef = useRef(null)
   const baseLayerRef = useRef(null)
   const pointsLayerRef = useRef(null)
   const overlayLayerRef = useRef(null)
   const vectorLayerRef = useRef(null)
+  const roiDraftLayerRef = useRef(null)
   const curvasLayerRef = useRef(null)
   const hasUserInteractedRef = useRef(false)
   const pointsFocusTokenRef = useRef(null)
@@ -94,6 +95,7 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
       pointsLayerRef.current = null
       overlayLayerRef.current = null
       vectorLayerRef.current = null
+      roiDraftLayerRef.current = null
       curvasLayerRef.current = null
       hasUserInteractedRef.current = false
       pointsFocusTokenRef.current = null
@@ -120,15 +122,56 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
 
   const vectorToken = useMemo(
     () =>
-      vectorVisible && vectorOverlay?.disponible && vectorOverlay?.bounds
+      vectorOverlay?.disponible && vectorOverlay?.bounds
         ? vectorOverlay.cache_buster || vectorOverlay.nombre || 'vector'
         : null,
-    [vectorVisible, vectorOverlay],
+    [vectorOverlay],
   )
   const curvasToken = useMemo(
     () => (curvasNivel?.disponible ? curvasNivel.cache_buster || 'curvas-5m' : null),
     [curvasNivel],
   )
+
+  useEffect(() => {
+    const map = mapInstanceRef.current
+    if (!map || !drawingRoi) return
+    const handleClick = (event) => {
+      hasUserInteractedRef.current = true
+      onRoiPoint([event.latlng.lng, event.latlng.lat])
+    }
+    map.doubleClickZoom.disable()
+    map.on('click', handleClick)
+    return () => {
+      map.off('click', handleClick)
+      map.doubleClickZoom.enable()
+    }
+  }, [drawingRoi, onRoiPoint])
+
+  useEffect(() => {
+    const map = mapInstanceRef.current
+    if (!map) return
+    if (roiDraftLayerRef.current) map.removeLayer(roiDraftLayerRef.current)
+    roiDraftLayerRef.current = null
+    if (!drawingRoi || !roiPoints.length) return
+    const latlngs = roiPoints.map(([lon, lat]) => [lat, lon])
+    const capa = L.layerGroup().addTo(map)
+    if (latlngs.length >= 3) {
+      L.polygon(latlngs, { color: '#06b6d4', weight: 3, fillColor: '#06b6d4', fillOpacity: 0.2 }).addTo(capa)
+    } else if (latlngs.length >= 2) {
+      L.polyline(latlngs, { color: '#06b6d4', weight: 3 }).addTo(capa)
+    }
+    latlngs.forEach((latlng, index) => {
+      L.circleMarker(latlng, {
+        radius: 5, color: '#ffffff', weight: 2, fillColor: '#0891b2', fillOpacity: 1,
+        bubblingMouseEvents: false,
+      }).bindTooltip(`Vertice ${index + 1}`).addTo(capa)
+    })
+    roiDraftLayerRef.current = capa
+    return () => {
+      map.removeLayer(capa)
+      if (roiDraftLayerRef.current === capa) roiDraftLayerRef.current = null
+    }
+  }, [drawingRoi, roiPoints])
 
   useEffect(() => {
     const map = mapInstanceRef.current
@@ -287,9 +330,7 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
     if (!vectorVisible || !vectorOverlay?.disponible || !vectorOverlay?.bounds || !vectorGeojson) {
       if (vectorLayerRef.current) {
         map.removeLayer(vectorLayerRef.current)
-        vectorLayerRef.current = null
       }
-      vectorFocusTokenRef.current = null
       return
     }
 
@@ -376,7 +417,7 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
     curvasLayerRef.current.bringToFront?.()
   }, [curvasToken, curvasNivel, curvasGeojson, contourLabelsVisible])
 
-  return <div ref={mapRef} className="map-canvas" />
+  return <div ref={mapRef} className={`map-canvas${drawingRoi ? ' is-drawing-roi' : ''}`} />
 }
 
 function Icon({ name }) {
@@ -588,6 +629,8 @@ export default function App() {
   const [zipFileKey, setZipFileKey] = useState(0)
   const [vectorFileKey, setVectorFileKey] = useState(0)
   const [vectorVisible, setVectorVisible] = useState(true)
+  const [drawingRoi, setDrawingRoi] = useState(false)
+  const [roiPoints, setRoiPoints] = useState([])
   const [contourLabelsVisible, setContourLabelsVisible] = useState(true)
   const [vectorOverlay, setVectorOverlay] = useState(null)
   const [curvasNivel, setCurvasNivel] = useState(null)
@@ -596,6 +639,14 @@ export default function App() {
   const [panelOpen, setPanelOpen] = useState(window.innerWidth > 760)
   const zipInputRef = useRef(null)
   const vectorInputRef = useRef(null)
+
+  const addRoiPoint = useCallback(([lon, lat]) => {
+    setRoiPoints((current) => {
+      const ultimo = current[current.length - 1]
+      if (ultimo && Math.abs(ultimo[0] - lon) < 1e-8 && Math.abs(ultimo[1] - lat) < 1e-8) return current
+      return [...current, [lon, lat]]
+    })
+  }, [])
 
   useEffect(() => {
     const check = () => setPanelOpen(window.innerWidth > 760)
@@ -697,6 +748,8 @@ export default function App() {
       setDriveUrl('')
       setShowDrive(false)
       setUploadProgress(null)
+      setDrawingRoi(false)
+      setRoiPoints([])
       showMessage('success', data.mensaje || 'Proyecto reiniciado')
       await refreshAll()
     } catch (error) {
@@ -760,6 +813,37 @@ export default function App() {
 
   const uploadVector = () => {
     vectorInputRef.current?.click()
+  }
+
+  const saveRoi = async () => {
+    if (roiPoints.length < 3) {
+      showMessage('error', 'Marca al menos tres vertices en el mapa')
+      return
+    }
+    try {
+      const data = await apiJson('/overlay/vector/roi', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ coordinates: roiPoints }),
+      })
+      setDrawingRoi(false)
+      setRoiPoints([])
+      setVectorVisible(true)
+      showMessage('success', data.mensaje)
+      await refreshAll()
+    } catch (error) {
+      showMessage('error', error.message || 'No se pudo guardar el ROI')
+    }
+  }
+
+  const removeClip = async () => {
+    try {
+      const data = await apiJson('/overlay/vector/recorte', { method: 'DELETE' })
+      showMessage('success', data.mensaje)
+      await refreshAll()
+    } catch (error) {
+      showMessage('error', error.message || 'No se pudo quitar el recorte')
+    }
   }
 
   const handleVectorChange = (event) => {
@@ -915,7 +999,11 @@ export default function App() {
           vectorVisible={vectorVisible}
           curvasNivel={curvasNivel}
           contourLabelsVisible={contourLabelsVisible}
+          drawingRoi={drawingRoi}
+          roiPoints={roiPoints}
+          onRoiPoint={addRoiPoint}
         />
+        {drawingRoi && <div className="roi-map-hint">Haz clic en el mapa para marcar el ROI · {roiPoints.length} vertices</div>}
       </div>
       <div className="backdrop backdrop-a" />
       <div className="backdrop backdrop-b" />
@@ -1030,7 +1118,7 @@ export default function App() {
                   Capa vectorial
                 </h2>
                 <span>
-                  {vectorOverlay?.disponible ? (vectorVisible ? 'Visible' : 'Oculta') : 'Sin capa'}
+                  {vectorOverlay?.disponible ? (vectorVisible ? 'Polígono visible' : 'Polígono oculto') : 'Sin capa'}
                 </span>
               </div>
               <div className="vector-summary">
@@ -1064,19 +1152,55 @@ export default function App() {
                 </div>
               </div>
               <div className="vector-actions">
-                <button className="round-action is-accent" onClick={uploadVector}>
+                <button className="round-action is-accent" onClick={uploadVector} disabled={status?.running || drawingRoi}>
                   <span className="round-action-icon"><Icon name="upload" /></span>
                   <span>Importar capa</span>
                 </button>
+                {!drawingRoi && (
+                  <button className="round-action is-accent" onClick={() => { setRoiPoints([]); setDrawingRoi(true) }} disabled={status?.running}>
+                    <span className="round-action-icon"><Icon name="target" /></span>
+                    <span>Dibujar ROI</span>
+                  </button>
+                )}
+                {drawingRoi && (
+                  <>
+                    <button className="round-action is-primary" onClick={saveRoi} disabled={roiPoints.length < 3}>
+                      <span className="round-action-icon"><Icon name="save" /></span>
+                      <span>Guardar ROI</span>
+                    </button>
+                    <button className="round-action" onClick={() => setRoiPoints((points) => points.slice(0, -1))} disabled={!roiPoints.length}>
+                      <span className="round-action-icon"><Icon name="refresh" /></span>
+                      <span>Deshacer punto</span>
+                    </button>
+                    <button className="round-action" onClick={() => { setDrawingRoi(false); setRoiPoints([]) }}>
+                      <span className="round-action-icon"><Icon name="stop" /></span>
+                      <span>Cancelar dibujo</span>
+                    </button>
+                  </>
+                )}
                 <button
                   className="round-action"
                   onClick={() => setVectorVisible((value) => !value)}
                   disabled={!vectorOverlay?.disponible}
+                  aria-pressed={vectorVisible && Boolean(vectorOverlay?.disponible)}
                 >
                   <span className="round-action-icon"><Icon name="mapPinned" /></span>
-                  <span>{vectorVisible ? 'Ocultar' : 'Mostrar'}</span>
+                  <span>{vectorVisible ? 'Ocultar polígono' : 'Mostrar polígono'}</span>
                 </button>
+                {vectorOverlay?.recorte_activo && (
+                  <button className="round-action" onClick={removeClip} disabled={status?.running || drawingRoi}>
+                    <span className="round-action-icon"><Icon name="target" /></span>
+                    <span>Quitar recorte</span>
+                  </button>
+                )}
               </div>
+              <p className="vector-clip-note">
+                {vectorOverlay?.recorte_activo
+                  ? 'Al procesar, el ROI recortará los ortomosaicos RGB y multiespectral. Fuera del polígono quedará transparente.'
+                  : drawingRoi
+                    ? 'Haz clic en el mapa para marcar al menos tres vertices y luego pulsa Guardar ROI.'
+                    : 'Importa un KML o dibuja un ROI en el mapa. Sin recorte se exportan los ortomosaicos completos.'}
+              </p>
             </section>
 
             </div>
@@ -1168,7 +1292,7 @@ export default function App() {
               </div>
 
               <div className="action-row action-row-tight">
-                <button className="round-action is-primary" onClick={startProcess} disabled={status?.running}>
+                <button className="round-action is-primary" onClick={startProcess} disabled={status?.running || drawingRoi}>
                   <span className="round-action-icon"><Icon name="play" /></span>
                   <span>Procesar</span>
                 </button>

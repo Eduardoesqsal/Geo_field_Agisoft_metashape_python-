@@ -55,7 +55,7 @@ def main():
         app.construir_ortomosaico()
         app.exportar_resultado()
 
-        print("\n--- FINALIZADO SIN ERRORES ---", flush=True)
+        print("\n--- METASHAPE FINALIZADO ---", flush=True)
     except Exception as e:
         error = e
         print(f"\nERROR EN EL PROCESO: {e}", flush=True)

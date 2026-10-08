@@ -5,7 +5,7 @@ from copy import deepcopy
 from datetime import datetime
 
 from backend.core.naming import DEFAULT_CAMERA_MODEL, DEFAULT_PROJECT_NAME, normalizar_modelo_camara, sanitizar_nombre_proyecto
-from backend.core.paths import BASE_DIR, CONTOURS_SCRIPT, FRONTEND_DIST_DIR, FRONTEND_INDEX_FILE, LOGS_DIR, MAIN_SCRIPT, METASHAPE_EXE, PROYECTO_DIR
+from backend.core.paths import BASE_DIR, CLIP_GEOJSON, CONTOURS_SCRIPT, FRONTEND_DIST_DIR, FRONTEND_INDEX_FILE, LOGS_DIR, MAIN_SCRIPT, METASHAPE_EXE, PROYECTO_DIR
 
 
 app_title = "Procesamiento Metashape"
@@ -167,6 +167,8 @@ def reset_runtime_state():
 
 
 def limpiar_salidas_proyecto():
+    if os.path.exists(CLIP_GEOJSON):
+        os.remove(CLIP_GEOJSON)
     if not os.path.isdir(PROYECTO_DIR):
         return
 

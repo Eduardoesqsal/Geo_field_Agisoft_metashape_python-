@@ -4,6 +4,7 @@ import os
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATASET_DIR = os.path.join(BASE_DIR, "dataset")
 PROYECTO_DIR = os.path.join(BASE_DIR, "proyecto")
+CLIP_GEOJSON = os.path.join(PROYECTO_DIR, "recorte_ortomosaico.geojson")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
 FRONTEND_DIST_DIR = os.path.join(BASE_DIR, "frontend", "dist")
 FRONTEND_INDEX_FILE = os.path.join(FRONTEND_DIST_DIR, "index.html")

@@ -18,12 +18,14 @@ from backend.config import (
     RUTA_ORTOMOSAICO_RGB,
     RUTA_PROYECTO,
 )
+from backend.core.paths import CLIP_GEOJSON
 
 
 class ProcesamientoMetashape:
     REDEDGE_RGB_STRETCH = (2, 98)
     REDEDGE_RGB_GAMMA = 1.15
     DEPTH_MAP_DOWNSCALE = 4
+    MAVIC_3M_ORTHO_RESOLUTION_M = 0.04
     # Perfil conservador: prioriza un MDT limpio aunque deje huecos que
     # Metashape deba interpolar. Todos los valores estan expresados en las
     # unidades que usa classifyGroundPoints (grados y metros).
@@ -203,6 +205,13 @@ class ProcesamientoMetashape:
             chunk = doc.addChunk()
             chunk.label = "MS"
             chunk.addPhotos(ms)
+            if self.camera_model == "mavic_3m":
+                self._log("[1/5] Calibrando reflectancia MS con el sensor solar")
+                if not hasattr(chunk, "calibrateReflectance"):
+                    raise RuntimeError("Esta version de Metashape no permite calibrar reflectancia")
+                for sensor in chunk.sensors:
+                    sensor.normalize_sensitivity = True
+                chunk.calibrateReflectance(use_reflectance_panels=False, use_sun_sensor=True)
 
         self._guardar_documento(RUTA_PROYECTO)
 
@@ -281,7 +290,7 @@ class ProcesamientoMetashape:
             raise RuntimeError("La version de Metashape no admite un MDT filtrado por clase Ground")
 
         for chunk in self._obtener_chunks():
-            if not chunk.cameras:
+            if not chunk.cameras or (getattr(chunk, "label", "") or "").strip().lower() != "rgb":
                 continue
             etiqueta = getattr(chunk, "label", "chunk")
             if not self._tiene_nube_de_puntos(chunk):
@@ -366,8 +375,45 @@ class ProcesamientoMetashape:
         Metashape = self._ms()
         elevation_data = self._enum("DataSource.ElevationData", "ElevationData")
         model_data = self._enum("DataSource.ModelData", "ModelData")
+        chunk_rgb = next(
+            (item for item in self._obtener_chunks()
+             if (getattr(item, "label", "") or "").strip().lower() == "rgb"),
+            None,
+        )
         for chunk in self._obtener_chunks():
             if not chunk.cameras:
+                continue
+            etiqueta = (getattr(chunk, "label", "") or "").strip().lower()
+            if etiqueta == "ms":
+                if chunk_rgb is None or not os.path.isfile(RUTA_DEM_SUELO):
+                    raise RuntimeError("El ortomosaico MS requiere fotos RGB para usar su DEM de suelo")
+                if elevation_data is None:
+                    raise RuntimeError("Metashape no admite importar el DEM RGB")
+                opciones_importacion = {
+                    "path": RUTA_DEM_SUELO,
+                    "raster_type": elevation_data,
+                    "nodata_value": -32767,
+                    "has_nodata_value": True,
+                }
+                if getattr(chunk_rgb, "crs", None) is not None:
+                    opciones_importacion["crs"] = chunk_rgb.crs
+                chunk.importRaster(**opciones_importacion)
+                if getattr(chunk, "elevation", None) is None:
+                    raise RuntimeError("No se pudo activar el DEM RGB en el chunk MS")
+                self._log("[4/5] DEM RGB importado en MS para construir el ortomosaico")
+            if etiqueta == "ms" and self.camera_model == "mavic_3m":
+                promedio = self._enum("BlendingMode.AverageBlending", "AverageBlending")
+                if elevation_data is None or getattr(chunk, "elevation", None) is None or promedio is None:
+                    raise RuntimeError("El ortomosaico MS necesita un DEM y el modo AverageBlending")
+                proyeccion, epsg = self._proyeccion_utm_ms(chunk)
+                chunk.buildOrthomosaic(
+                    surface_data=elevation_data,
+                    blending_mode=promedio,
+                    fill_holes=True,
+                    projection=proyeccion,
+                    resolution=self.MAVIC_3M_ORTHO_RESOLUTION_M,
+                )
+                self._log(f"[4/5] Ortomosaico MS calibrado en EPSG:{epsg}: {etiqueta}")
                 continue
             try:
                 kwargs = {}
@@ -382,6 +428,95 @@ class ProcesamientoMetashape:
             self._log(f"[4/5] Ortofoto construida: {getattr(chunk, 'label', 'chunk')}")
         self._guardar_documento()
 
+    def _proyeccion_utm_ms(self, chunk):
+        """Calcula la zona UTM desde la referencia GPS de las fotos MS."""
+        Metashape = self._ms()
+        epsg_configurado = os.environ.get("METASHAPE_MS_EPSG", "").strip()
+        if epsg_configurado:
+            epsg = int(epsg_configurado)
+        else:
+            if chunk.crs is None:
+                raise RuntimeError("El chunk MS no tiene CRS; define METASHAPE_MS_EPSG")
+            wgs84 = Metashape.CoordinateSystem("EPSG::4326")
+            posicion = next(
+                (camera.reference.location for camera in chunk.cameras
+                 if camera.reference.location is not None),
+                None,
+            )
+            if posicion is None:
+                raise RuntimeError("Las fotos MS no tienen GPS; define METASHAPE_MS_EPSG")
+            geo = Metashape.CoordinateSystem.transform(posicion, chunk.crs, wgs84)
+            lon, lat = float(geo.x), float(geo.y)
+            if not (-180 <= lon <= 180 and -80 <= lat <= 84):
+                raise RuntimeError("No se pudo determinar una zona UTM valida para el chunk MS")
+            zona = min(60, max(1, int((lon + 180) // 6) + 1))
+            epsg = (32600 if lat >= 0 else 32700) + zona
+        if epsg not in range(32601, 32661) and epsg not in range(32701, 32761):
+            raise RuntimeError("METASHAPE_MS_EPSG debe ser un codigo UTM WGS84")
+        proyeccion = Metashape.OrthoProjection()
+        proyeccion.crs = Metashape.CoordinateSystem(f"EPSG::{epsg}")
+        return proyeccion, epsg
+
+    def _opciones_exportacion_ms(self, chunk):
+        if self.camera_model != "mavic_3m":
+            return {}, None
+        transformacion = self._enum(
+            "RasterTransformType.RasterTransformValue", "RasterTransformValue"
+        )
+        formato_tiff = self._enum("ImageFormat.ImageFormatTIFF", "ImageFormatTIFF")
+        if transformacion is None or formato_tiff is None:
+            raise RuntimeError("Esta version de Metashape no admite TIFF de reflectancia decimal")
+        chunk.raster_transform.formula = [f"B{i} / 32768" for i in range(1, 5)]
+        chunk.raster_transform.enabled = True
+        proyeccion, epsg = self._proyeccion_utm_ms(chunk)
+        self._log(f"[5/5] MS: valores radiometricos decimales, EPSG:{epsg}, bandas Green/Red/RedEdge/NIR")
+        return {
+            "raster_transform": transformacion,
+            "image_format": formato_tiff,
+            "projection": proyeccion,
+            "nodata_value": -10000,
+        }, epsg
+
+    def _verificar_exportacion_ms(self, ruta, epsg, radiometric_correction=None):
+        if rasterio is None:
+            raise RuntimeError("Se necesita rasterio para verificar el TIFF MS exportado")
+        with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=True), rasterio.open(ruta, "r+") as src:
+            if src.count != 5 or src.dtypes[0] != "float32" or src.crs is None or src.crs.to_epsg() != epsg:
+                raise RuntimeError(
+                    f"TIFF MS inesperado: {src.count} bandas, {src.dtypes[0]}, {src.crs}; "
+                    "se esperaban 5 bandas float32 en UTM"
+                )
+            # La banda Alpha de Metashape puede valer 0 fuera del mosaico
+            # mientras GDAL considera validos todos los pixeles si no hay NoData.
+            # Escribimos NoData en las cuatro bandas espectrales para que
+            # masked=True descarte esas celdas; Alpha conserva 0/1. La mascara
+            # interna tambien corrige dataset_mask(), que algunas apps usan.
+            for _, ventana in src.block_windows(5):
+                alpha = src.read(5, window=ventana)
+                sin_datos = ~np.isfinite(alpha) | (alpha <= 0)
+                src.write_mask(np.where(sin_datos, 0, 255).astype(np.uint8), window=ventana)
+                if not np.any(sin_datos):
+                    continue
+                bandas = src.read([1, 2, 3, 4], window=ventana)
+                bandas[:, sin_datos] = -10000
+                src.write(bandas, indexes=[1, 2, 3, 4], window=ventana)
+            src.nodata = -10000
+            nombres = ("Green", "Red", "Red edge", "NIR", "Alpha")
+            longitudes = (560, 650, 730, 860)
+            anchos = (16, 16, 16, 26)
+            for indice, nombre in enumerate(nombres, 1):
+                src.set_band_description(indice, nombre)
+                if indice <= 4:
+                    src.update_tags(
+                        indice,
+                        CentralWavelength=str(longitudes[indice - 1]),
+                        WavelengthFWHM=str(anchos[indice - 1]),
+                    )
+            src.update_tags(
+                RadiometricCorrection=radiometric_correction or "not_applied",
+                RadiometricScale="B1-B4 / 32768",
+            )
+
     def exportar_resultado(self):
         self._log("[5/5] Exportando resultado")
         Metashape = self._ms()
@@ -394,6 +529,14 @@ class ProcesamientoMetashape:
             "ms": RUTA_ORTOMOSAICO_MS,
         }
         exportados = []
+        usar_roi = os.path.isfile(CLIP_GEOJSON)
+        limite_exterior = None
+        formato_geojson = None
+        if usar_roi:
+            limite_exterior = self._enum("Shape.BoundaryType.OuterBoundary", "Shape.OuterBoundary")
+            formato_geojson = self._enum("ShapesFormat.ShapesFormatGeoJSON", "ShapesFormatGeoJSON")
+            if limite_exterior is None or formato_geojson is None:
+                raise RuntimeError("Esta version de Metashape no permite importar el ROI como limite exterior")
 
         def _borrar_si_existe(ruta):
             try:
@@ -410,11 +553,12 @@ class ProcesamientoMetashape:
             if hasattr(compression, "tiff_compression") and hasattr(Metashape.ImageCompression, "TiffCompressionDeflate"):
                 compression.tiff_compression = Metashape.ImageCompression.TiffCompressionDeflate
 
-        def _exportar_chunk(chunk, destino, *, save_alpha=None, white_background=None, usar_compresion=True):
+        def _exportar_chunk(chunk, destino, *, save_alpha=None, white_background=None, usar_compresion=True, opciones=None):
             if not hasattr(chunk, "exportRaster"):
                 return False
 
             kwargs = {"path": destino}
+            kwargs.update(opciones or {})
             if orthomosaic_data is not None:
                 kwargs["source_data"] = orthomosaic_data
             if compression is not None and usar_compresion:
@@ -423,6 +567,7 @@ class ProcesamientoMetashape:
                 kwargs["save_alpha"] = save_alpha
             if white_background is not None:
                 kwargs["white_background"] = white_background
+            kwargs["clip_to_boundary"] = usar_roi
 
             _borrar_si_existe(destino)
             try:
@@ -455,12 +600,27 @@ class ProcesamientoMetashape:
                 )
 
             try:
+                if usar_roi:
+                    chunk.importShapes(
+                        path=CLIP_GEOJSON,
+                        boundary_type=limite_exterior,
+                        format=formato_geojson,
+                        crs=Metashape.CoordinateSystem("EPSG::4326"),
+                    )
+                    self._log(f"[5/5] ROI cargado en Metashape como limite exterior: {etiqueta.upper()}")
+                opciones_ms, epsg_ms = self._opciones_exportacion_ms(chunk) if etiqueta == "ms" else ({}, None)
+                if etiqueta == "ms" and self.camera_model == "mavic_3m":
+                    opciones_ms["resolution"] = self.MAVIC_3M_ORTHO_RESOLUTION_M
                 exportado = _exportar_chunk(
                     chunk,
                     destino,
                     save_alpha=True,
                     white_background=False,
+                    opciones=opciones_ms,
                 )
+
+                if etiqueta == "ms" and exportado and self.camera_model == "mavic_3m":
+                    self._verificar_exportacion_ms(destino, epsg_ms, radiometric_correction="sun_sensor")
 
                 if etiqueta == "rgb" and exportado and not self._raster_tiene_datos_utiles(destino):
                     self._log("[5/5] El TIFF RGB salio vacio; reintentando exportacion sin compresion")
@@ -476,11 +636,14 @@ class ProcesamientoMetashape:
                     if etiqueta == "rgb" and not self._raster_tiene_datos_utiles(destino):
                         raise RuntimeError("El TIFF RGB exportado sigue sin datos utiles")
                     exportados.append(destino)
+                    if usar_roi:
+                        self._log(f"[5/5] Ortomosaico {etiqueta.upper()} recortado por Metashape: {destino}")
                     self._log(f"[5/5] Exportado (con canal alfa): {destino}")
                 else:
                     self._log(f"[5/5] No se pudo exportar {etiqueta or 'chunk'}: sin exportador compatible")
             except Exception as exc:
                 self._log(f"[5/5] No se pudo exportar {etiqueta or 'chunk'}: {exc}")
+                raise
 
         if not exportados:
             raise RuntimeError("No se pudo exportar ningun ortomosaico")

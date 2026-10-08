@@ -13,6 +13,7 @@ from backend.services.contours import _sincronizar_curvas_nivel
 
 
 def reader_loop(proc, task="pipeline"):
+    code = None
     try:
         for line in proc.stdout:
             runtime_state.push_log(line)
@@ -28,7 +29,7 @@ def reader_loop(proc, task="pipeline"):
                 runtime_state.update_state(step="exportando_resultado", message=line.strip())
             elif "[7/7]" in line:
                 runtime_state.update_state(step="generando_curvas", message=line.strip())
-            elif "FINALIZADO SIN ERRORES" in line or "PIPELINE FINALIZADO" in line:
+            elif "PIPELINE FINALIZADO" in line:
                 runtime_state.update_state(message=line.strip())
     finally:
         code = proc.poll()
@@ -54,7 +55,7 @@ def reader_loop(proc, task="pipeline"):
             message = (
                 "Curvas de nivel generadas"
                 if task == "contours"
-                else "Agisoft finalizado. Ortomosaicos y DEM de suelo/sin clasificar listos"
+                else "Agisoft finalizado. Ortomosaicos y DEM RGB de suelo/sin clasificar listos"
             )
             runtime_state.update_state(step="finalizado", message=message)
             runtime_state.push_log("Proceso finalizado sin errores")
