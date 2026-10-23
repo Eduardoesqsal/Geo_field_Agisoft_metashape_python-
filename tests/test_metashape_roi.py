@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -12,21 +13,100 @@ from backend.workflow import ProcesamientoMetashape
 
 
 class ExportacionRoiNativoTest(unittest.TestCase):
-    def test_construye_dem_completo_y_filtrado_en_rgb_y_ms(self):
+    def test_alinea_en_calidad_baja_y_omite_nube_y_mapas_de_profundidad(self):
+        llamadas = {}
+        chunk = SimpleNamespace(
+            cameras=[object()], label="RGB",
+            matchPhotos=lambda **kwargs: llamadas.setdefault("alineacion", kwargs),
+            alignCameras=lambda: None,
+            resetRegion=lambda: None,
+            buildDepthMaps=lambda **kwargs: self.fail("No debe generar mapas de profundidad"),
+            buildPointCloud=lambda **kwargs: self.fail("No debe generar nube de puntos"),
+            buildDem=lambda **kwargs: (llamadas.setdefault("dem", kwargs), setattr(chunk, "elevation", SimpleNamespace(label=""))),
+        )
+        app = ProcesamientoMetashape()
+        app._metashape = SimpleNamespace(
+            DataSource=SimpleNamespace(TiePointsData="puntos_de_paso"),
+        )
+        app._obtener_chunks = lambda: [chunk]
+        app._exportar_dem = lambda *_: None
+        app._guardar_documento = lambda *_: None
+
+        app.alinear_camaras()
+        app.construir_mde()
+
+        self.assertEqual(llamadas["alineacion"]["downscale"], 4)
+        self.assertEqual(llamadas["dem"]["source_data"], "puntos_de_paso")
+        self.assertEqual(llamadas["dem"]["resolution"], 0.5)
+        self.assertEqual(chunk.elevation.label, "DEM - Puntos de paso")
+
+    def test_shapefile_exporta_una_pieza_por_poligono(self):
+        exportaciones = []
+
+        def exportar(**opciones):
+            exportaciones.append(opciones)
+            with rasterio.open(
+                opciones["path"], "w", driver="GTiff", width=10, height=4,
+                count=3, dtype="uint8", crs="EPSG:4326",
+                transform=from_origin(0, 4, 1, 1),
+            ) as raster:
+                raster.write(np.full((3, 4, 10), 100, dtype="uint8"))
+
+        chunk = SimpleNamespace(cameras=[object()], label="RGB", exportRaster=exportar)
+        app = ProcesamientoMetashape()
+        app._metashape = SimpleNamespace(DataSource=SimpleNamespace(OrthomosaicData="ortomosaico"))
+        app._obtener_chunks = lambda: [chunk]
+        app._raster_tiene_datos_utiles = lambda _: True
+        app._guardar_documento = lambda *_: None
+
+        with tempfile.TemporaryDirectory() as carpeta:
+            roi = os.path.join(carpeta, "roi.geojson")
+            salida = os.path.join(carpeta, "prueba_rgb.tif")
+            geometrias = [
+                {"type": "Polygon", "coordinates": [[[0, 0], [2, 0], [2, 2], [0, 2], [0, 0]]]},
+                {"type": "Polygon", "coordinates": [[[8, 2], [10, 2], [10, 4], [8, 4], [8, 2]]]},
+            ]
+            with open(roi, "w", encoding="utf-8") as archivo:
+                json.dump({"type": "FeatureCollection", "features": [{
+                    "type": "Feature", "properties": {},
+                    "geometry": {"type": "MultiPolygon", "coordinates": [
+                        geometria["coordinates"] for geometria in geometrias
+                    ]},
+                }], "_recorte": {"formato": "shp"}}, archivo)
+            pieza_antigua = os.path.join(carpeta, "prueba_rgb_poligono_003.tif")
+            with open(pieza_antigua, "wb") as archivo:
+                archivo.write(b"anterior")
+            with patch("backend.workflow.CLIP_GEOJSON", roi), \
+                 patch("backend.workflow.RUTA_ORTOMOSAICO_RGB", salida), \
+                 patch("backend.workflow.RUTA_PROYECTO", os.path.join(carpeta, "prueba.psx")):
+                app.exportar_resultado()
+
+            self.assertFalse(exportaciones[0]["clip_to_boundary"])
+            self.assertEqual(exportaciones[0]["resolution"], 0)
+            self.assertNotEqual(exportaciones[0]["path"], salida)
+            self.assertFalse(os.path.exists(exportaciones[0]["path"]))
+            self.assertFalse(os.path.exists(pieza_antigua))
+            for indice in (1, 2):
+                pieza = os.path.join(carpeta, f"prueba_rgb_poligono_{indice:03d}.tif")
+                with rasterio.open(pieza) as raster:
+                    self.assertEqual((raster.width, raster.height), (2, 2))
+            with rasterio.open(salida) as raster:
+                self.assertEqual((raster.width, raster.height), (10, 4))
+                self.assertEqual(raster.dataset_mask()[0, 0], 0)
+
+    def test_construye_un_dem_por_chunk_rgb_y_ms(self):
         resultados = {}
+        exportaciones = []
 
         def crear_chunk(etiqueta):
             dem_completo = SimpleNamespace(key=f"{etiqueta}-completo", label="")
-            dem_filtrado = SimpleNamespace(key=f"{etiqueta}-filtrado", label="")
             chunk = SimpleNamespace(
                 cameras=[object()], label=etiqueta, elevation=None, elevations=[],
-                point_cloud=SimpleNamespace(classifyGroundPoints=lambda **_: None),
             )
 
             def construir_dem(**opciones):
-                dem = dem_filtrado if opciones.get("classes") else dem_completo
-                chunk.elevations.append(dem)
-                chunk.elevation = dem
+                chunk.elevations.append(dem_completo)
+                chunk.elevation = dem_completo
                 resultados.setdefault(etiqueta, []).append(opciones)
 
             chunk.buildDem = construir_dem
@@ -35,25 +115,24 @@ class ExportacionRoiNativoTest(unittest.TestCase):
         chunks = [crear_chunk("RGB"), crear_chunk("MS")]
         app = ProcesamientoMetashape(camera_model="mavic_3m")
         app._metashape = SimpleNamespace(
-            DataSource=SimpleNamespace(PointCloudData="nube"),
-            PointClass=SimpleNamespace(Ground="suelo"),
+            DataSource=SimpleNamespace(TiePointsData="puntos_de_paso"),
         )
         app._obtener_chunks = lambda: chunks
-        app._exportar_dem = lambda *_: None
+        app._exportar_dem = lambda *args: exportaciones.append(args)
         app._guardar_documento = lambda *_: None
 
         app.construir_mde()
 
         for chunk in chunks:
-            self.assertEqual(len(chunk.elevations), 2)
-            self.assertEqual(chunk.elevation.label, "DEM - Suelo clasificado (Ground)")
-            self.assertEqual(resultados[chunk.label][0], {"source_data": "nube"})
-            self.assertEqual(resultados[chunk.label][1]["classes"], ["suelo"])
+            self.assertEqual(len(chunk.elevations), 1)
+            self.assertEqual(chunk.elevation.label, "DEM - Puntos de paso")
+            self.assertEqual(resultados[chunk.label], [{"source_data": "puntos_de_paso", "resolution": 0.5}])
+        self.assertEqual(len(exportaciones), 2)
 
     def test_ms_construye_ortomosaico_con_su_dem_como_rgb(self):
         llamadas_rgb = []
         llamadas_ms = []
-        dem_ms = SimpleNamespace(label="DEM - Suelo clasificado (Ground)")
+        dem_ms = SimpleNamespace(label="DEM - Todos los puntos")
         rgb = SimpleNamespace(cameras=[object()], label="RGB",
                               buildOrthomosaic=lambda **kwargs: llamadas_rgb.append(kwargs))
         ms = SimpleNamespace(
@@ -72,8 +151,42 @@ class ExportacionRoiNativoTest(unittest.TestCase):
         app.construir_ortomosaico()
 
         self.assertIs(ms.elevation, dem_ms)
-        self.assertEqual(llamadas_rgb, [{"surface_data": "elevacion"}])
-        self.assertEqual(llamadas_ms, llamadas_rgb)
+        self.assertEqual(llamadas_rgb, [{
+            "surface_data": "elevacion", "resolution": 0, "refine_seamlines": True,
+        }])
+        self.assertEqual(llamadas_ms, [{"surface_data": "elevacion", "resolution": 0.2}])
+
+    def test_rededge_usa_el_dem_unico_de_rgb(self):
+        importaciones = []
+        ortomosaicos = []
+        rgb = SimpleNamespace(
+            cameras=[object()], label="RGB", crs="EPSG::32614",
+            buildOrthomosaic=lambda **kwargs: ortomosaicos.append(("RGB", kwargs)),
+        )
+        ms = SimpleNamespace(
+            cameras=[object()], label="MS", elevation=None,
+            importRaster=lambda **kwargs: (importaciones.append(kwargs), setattr(ms, "elevation", object())),
+            buildOrthomosaic=lambda **kwargs: ortomosaicos.append(("MS", kwargs)),
+        )
+        app = ProcesamientoMetashape(camera_model="rededge_m")
+        app._metashape = SimpleNamespace(
+            DataSource=SimpleNamespace(ElevationData="elevacion", ModelData="modelo"),
+        )
+        app._obtener_chunks = lambda: [rgb, ms]
+        app._guardar_documento = lambda *_: None
+
+        with tempfile.TemporaryDirectory() as carpeta:
+            ruta_dem = os.path.join(carpeta, "rgb_dem.tif")
+            with open(ruta_dem, "wb") as archivo:
+                archivo.write(b"dem")
+            with patch("backend.workflow.RUTA_DEM_SIN_CLASIFICAR", ruta_dem):
+                app.construir_ortomosaico()
+
+        self.assertEqual(importaciones[0]["path"], ruta_dem)
+        self.assertEqual(ortomosaicos, [
+            ("RGB", {"surface_data": "elevacion", "resolution": 0, "refine_seamlines": True}),
+            ("MS", {"surface_data": "elevacion", "resolution": 0.2}),
+        ])
 
     def test_ms_exporta_reflectancia_y_verifica_bandas(self):
         exportaciones = []
@@ -100,7 +213,7 @@ class ExportacionRoiNativoTest(unittest.TestCase):
                 app.exportar_resultado()
 
         self.assertEqual(exportaciones[0]["raster_transform"], "reflectancia")
-        self.assertNotIn("resolution", exportaciones[0])
+        self.assertEqual(exportaciones[0]["resolution"], 0.2)
         self.assertEqual(exportaciones[0]["path"], salida + ".metashape_raw.tif")
         self.assertEqual(verificaciones[0][0], (salida + ".metashape_raw.tif", 32614))
         self.assertEqual(verificaciones[0][1]["radiometric_correction"], "sun_sensor")
@@ -190,6 +303,7 @@ class ExportacionRoiNativoTest(unittest.TestCase):
         self.assertEqual(importaciones[0]["format"], "geojson")
         self.assertEqual(importaciones[0]["crs"], "EPSG::4326")
         self.assertTrue(exportaciones[0]["clip_to_boundary"])
+        self.assertEqual(exportaciones[0]["resolution"], 0)
         self.assertTrue(exportaciones[0]["save_alpha"])
 
 

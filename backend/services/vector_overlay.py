@@ -6,11 +6,16 @@ from datetime import datetime
 
 import geopandas as gpd
 import numpy as np
+import pyogrio
 from fastapi import HTTPException
 from shapely.geometry import Polygon
 
 import backend.runtime as runtime
 from backend.core.paths import CLIP_GEOJSON
+
+
+def _clip_path():
+    return runtime.active_clip_path() if runtime.snapshot_ingesta_info().get("project_id") else CLIP_GEOJSON
 
 
 def _buscar_archivo_vectorial_extraido(ruta_base):
@@ -36,7 +41,7 @@ def _extraer_vector_desde_zip(ruta_zip, tmpdir):
     if ruta_vector is None:
         raise HTTPException(
             status_code=400,
-            detail="El ZIP debe incluir un shapefile (.shp + .dbf + .shx), un KML o un GeoJSON",
+            detail="El ZIP debe incluir un shapefile (.shp + .dbf; .shx opcional), un KML o un GeoJSON",
         )
     return ruta_vector, tipo
 
@@ -50,7 +55,39 @@ def _filtrar_poligonos(gdf):
 
 
 def _cargar_overlay_vectorial_desde_ruta(ruta):
-    gdf = gpd.read_file(ruta)
+    es_shapefile = os.path.splitext(ruta)[1].lower() == ".shp"
+    falta_shx = False
+    if es_shapefile:
+        base = os.path.splitext(os.path.basename(ruta))[0].lower()
+        componentes = {
+            os.path.splitext(nombre)[1].lower()
+            for nombre in os.listdir(os.path.dirname(ruta))
+            if os.path.splitext(nombre)[0].lower() == base
+        }
+        if ".dbf" not in componentes:
+            raise HTTPException(
+                status_code=400,
+                detail="El shapefile debe incluir .shp y .dbf en el mismo ZIP",
+            )
+        falta_shx = ".shx" not in componentes
+    try:
+        if falta_shx:
+            # GDAL puede reconstruir el indice mientras los archivos estan en el directorio temporal.
+            with runtime.lock:
+                anterior = pyogrio.get_gdal_config_option("SHAPE_RESTORE_SHX")
+                try:
+                    pyogrio.set_gdal_config_options({"SHAPE_RESTORE_SHX": "YES"})
+                    gdf = gpd.read_file(ruta)
+                finally:
+                    pyogrio.set_gdal_config_options({"SHAPE_RESTORE_SHX": anterior})
+        else:
+            gdf = gpd.read_file(ruta)
+    except Exception as exc:
+        detalle = (
+            "No se pudo reconstruir el indice .shx del shapefile"
+            if falta_shx else "No se pudo leer el archivo vectorial"
+        )
+        raise HTTPException(status_code=400, detail=f"{detalle}: {exc}") from exc
     return _cargar_overlay_vectorial_desde_gdf(gdf)
 
 
@@ -137,14 +174,15 @@ async def cargar_y_sincronizar_desde_upload(upload):
 
 
 def _guardar_recorte(geojson, nombre, formato):
-    os.makedirs(os.path.dirname(CLIP_GEOJSON), exist_ok=True)
-    temporal = CLIP_GEOJSON + ".tmp"
+    clip_path = _clip_path()
+    os.makedirs(os.path.dirname(clip_path), exist_ok=True)
+    temporal = clip_path + ".tmp"
     contenido = dict(geojson)
     contenido["_recorte"] = {"nombre": nombre, "formato": formato}
     try:
         with open(temporal, "w", encoding="utf-8") as archivo:
             json.dump(contenido, archivo)
-        os.replace(temporal, CLIP_GEOJSON)
+        os.replace(temporal, clip_path)
     finally:
         if os.path.exists(temporal):
             os.remove(temporal)
@@ -185,12 +223,13 @@ def recuperar_recorte_guardado():
     with runtime.lock:
         if runtime.shapefile_overlay_cache.get("geojson") is not None:
             return
-    if not os.path.isfile(CLIP_GEOJSON):
+    clip_path = _clip_path()
+    if not os.path.isfile(clip_path):
         return
-    with open(CLIP_GEOJSON, encoding="utf-8") as archivo:
+    with open(clip_path, encoding="utf-8") as archivo:
         contenido = json.load(archivo)
     meta = contenido.get("_recorte") or {}
-    geojson, bounds, superficie_m2, superficie_ha, feature_count = _cargar_overlay_vectorial_desde_ruta(CLIP_GEOJSON)
+    geojson, bounds, superficie_m2, superficie_ha, feature_count = _cargar_overlay_vectorial_desde_ruta(clip_path)
     _sincronizar_overlay_vectorial(
         geojson=geojson,
         bounds=bounds,
@@ -234,12 +273,12 @@ async def _cargar_desde_upload(upload, nombre, ext):
                 f.write(contenido)
 
         geojson, bounds, superficie_m2, superficie_ha, feature_count = _cargar_overlay_vectorial_desde_ruta(ruta_vector)
-        # La capa KML importada funciona tambien como limite del ortomosaico.
+        # KML y shapefile importados funcionan como limite del ortomosaico.
         # Guardamos GeoJSON WGS84 para el proceso externo de Metashape.
-        if formato == "kml":
+        if formato in {"kml", "shp"}:
             _guardar_recorte(geojson, nombre, formato)
-        elif os.path.exists(CLIP_GEOJSON):
-            os.remove(CLIP_GEOJSON)
+        elif os.path.exists(_clip_path()):
+            os.remove(_clip_path())
         cache = _sincronizar_overlay_vectorial(
             geojson=geojson,
             bounds=bounds,
@@ -253,7 +292,7 @@ async def _cargar_desde_upload(upload, nombre, ext):
     runtime.push_log(f"Overlay vectorial cargado: {nombre}")
     return {
         "ok": True,
-        "mensaje": "KML cargado: recortara los ortomosaicos" if formato == "kml" else "Capa vectorial cargada y visible como overlay",
+        "mensaje": "Capa vectorial cargada: recortara los ortomosaicos" if formato in {"kml", "shp"} else "Capa vectorial cargada y visible como overlay",
         "bounds": cache.get("bounds"),
         "cache_buster": cache.get("cache_buster"),
         "nombre": cache.get("nombre"),

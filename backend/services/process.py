@@ -6,13 +6,14 @@ from datetime import datetime
 from fastapi import HTTPException
 
 import backend.core.state as runtime_state
-from backend.core.naming import normalizar_modelo_camara, sanitizar_nombre_proyecto
-from backend.core.paths import BASE_DIR, CONTOURS_SCRIPT, MAIN_SCRIPT, METASHAPE_EXE
+from backend.core.naming import normalizar_modelo_camara
+from backend.core.catalog import image_count
+from backend.core.paths import BASE_DIR, MAIN_SCRIPT, METASHAPE_EXE
 from backend.services.overlay import _sincronizar_overlay_proyecto
-from backend.services.contours import _sincronizar_curvas_nivel
+from backend.services.projects import ensure_processing_project
 
 
-def reader_loop(proc, task="pipeline"):
+def reader_loop(proc):
     code = None
     try:
         for line in proc.stdout:
@@ -27,8 +28,6 @@ def reader_loop(proc, task="pipeline"):
                 runtime_state.update_state(step="construyendo_ortomosaico", message=line.strip())
             elif "[5/5]" in line:
                 runtime_state.update_state(step="exportando_resultado", message=line.strip())
-            elif "[7/7]" in line:
-                runtime_state.update_state(step="generando_curvas", message=line.strip())
             elif "PIPELINE FINALIZADO" in line:
                 runtime_state.update_state(message=line.strip())
     finally:
@@ -52,19 +51,9 @@ def reader_loop(proc, task="pipeline"):
             returncode=code,
         )
         if code == 0:
-            message = (
-                "Curvas de nivel generadas"
-                if task == "contours"
-                else "Agisoft finalizado. Ortomosaicos y DEM RGB/MS completos y clasificados listos"
-            )
-            runtime_state.update_state(step="finalizado", message=message)
+            runtime_state.update_state(step="finalizado", message="Agisoft finalizado. Ortomosaicos y DEM listos")
             runtime_state.push_log("Proceso finalizado sin errores")
-            if task != "contours":
-                _sincronizar_overlay_proyecto()
-            try:
-                _sincronizar_curvas_nivel()
-            except Exception as exc:
-                runtime_state.push_log(f"No se pudo sincronizar curvas: {exc}")
+            _sincronizar_overlay_proyecto()
         elif code is not None:
             runtime_state.update_state(step="error", message=f"Proceso terminado con codigo {code}")
             runtime_state.push_log(f"Proceso terminado con codigo {code}")
@@ -78,17 +67,12 @@ def iniciar_proceso(nombre_proyecto=None, camera_model=None):
             raise HTTPException(status_code=500, detail=f"No existe Metashape.exe en {METASHAPE_EXE}")
         if not os.path.exists(MAIN_SCRIPT):
             raise HTTPException(status_code=500, detail=f"No existe main.py en {MAIN_SCRIPT}")
-        if runtime_state.ingesta_info["imagenes_validas"] <= 0:
-            raise HTTPException(status_code=400, detail="Primero carga un ZIP o un enlace de Drive con imagenes validas")
-
-        if nombre_proyecto:
-            nombre_limpio = sanitizar_nombre_proyecto(nombre_proyecto)
-            runtime_state.ingesta_info["nombre_proyecto"] = nombre_limpio
-        else:
-            nombre_limpio = runtime_state.nombre_proyecto_actual()
+        dataset_id = runtime_state.ingesta_info.get("dataset_id") or "legacy"
+        if image_count(runtime_state.active_dataset_dir(), recursive=dataset_id != "legacy") <= 0:
+            raise HTTPException(status_code=400, detail="Selecciona un dataset con imagenes validas")
 
         modelo_camara = normalizar_modelo_camara(camera_model)
-        runtime_state.ingesta_info["camera_model"] = modelo_camara
+        nombre_limpio = ensure_processing_project(nombre_proyecto, modelo_camara)
 
         runtime_state.logs.clear()
         runtime_state.state.update(
@@ -104,18 +88,24 @@ def iniciar_proceso(nombre_proyecto=None, camera_model=None):
         env = os.environ.copy()
         env["METASHAPE_PROJECT_NAME"] = nombre_limpio
         env["METASHAPE_CAMERA_MODEL"] = modelo_camara
+        env["METASHAPE_PROJECT_DIR"] = runtime_state.active_project_dir()
+        env["METASHAPE_DATASET_DIR"] = runtime_state.active_dataset_dir()
 
-        runtime_state.process = subprocess.Popen(
-            [METASHAPE_EXE, "-r", MAIN_SCRIPT],
-            cwd=BASE_DIR,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            encoding="utf-8",
-            errors="replace",
-        )
+        try:
+            runtime_state.process = subprocess.Popen(
+                [METASHAPE_EXE, "-r", MAIN_SCRIPT],
+                cwd=BASE_DIR,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError as exc:
+            runtime_state.state.update(running=False, step="error", message=f"No se pudo iniciar Metashape: {exc}")
+            raise HTTPException(status_code=500, detail=f"No se pudo iniciar Metashape: {exc}") from exc
         runtime_state.reader_thread = threading.Thread(target=reader_loop, args=(runtime_state.process,), daemon=True)
         runtime_state.reader_thread.start()
 
@@ -125,73 +115,6 @@ def iniciar_proceso(nombre_proyecto=None, camera_model=None):
         "message": f"Proceso iniciado en segundo plano: {nombre_limpio}",
         "nombre_proyecto": nombre_limpio,
         "camera_model": modelo_camara,
-    }
-
-
-def iniciar_curvas_nivel(intervalo_m=5, intervalo_maestra_m=25):
-    """Genera curvas desde el proyecto Metashape existente, sin reprocesarlo."""
-    try:
-        intervalo_m = float(intervalo_m)
-        intervalo_maestra_m = float(intervalo_maestra_m)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=422, detail="Los intervalos deben ser numericos")
-    if intervalo_m <= 0 or intervalo_maestra_m <= 0:
-        raise HTTPException(status_code=422, detail="Los intervalos deben ser mayores que cero")
-    if intervalo_maestra_m < intervalo_m or abs(intervalo_maestra_m / intervalo_m - round(intervalo_maestra_m / intervalo_m)) > 1e-6:
-        raise HTTPException(status_code=422, detail="El intervalo maestro debe ser multiplo del intervalo delgado")
-
-    with runtime_state.lock:
-        if runtime_state.state["running"]:
-            raise HTTPException(status_code=409, detail="Ya hay un proceso en ejecucion")
-        if not os.path.exists(METASHAPE_EXE):
-            raise HTTPException(status_code=500, detail=f"No existe Metashape.exe en {METASHAPE_EXE}")
-        if not os.path.exists(CONTOURS_SCRIPT):
-            raise HTTPException(status_code=500, detail="No existe el script de curvas de nivel")
-
-        nombre = sanitizar_nombre_proyecto(runtime_state.ingesta_info.get("nombre_proyecto"))
-        proyecto = os.path.join(BASE_DIR, "proyecto", f"{nombre}.psx")
-        if not os.path.exists(proyecto):
-            raise HTTPException(status_code=400, detail=f"No existe el proyecto procesado: {proyecto}")
-
-        runtime_state.state.update(
-            running=True,
-            step="generando_curvas",
-            message=f"Generando curvas delgadas cada {intervalo_m:g} m y maestras cada {intervalo_maestra_m:g} m",
-            started_at=datetime.now().isoformat(timespec="seconds"),
-            finished_at=None,
-            returncode=None,
-            error=None,
-        )
-        runtime_state.curvas_nivel_cache["intervalo_m"] = intervalo_m
-        runtime_state.curvas_nivel_cache["intervalo_maestra_m"] = intervalo_maestra_m
-        env = os.environ.copy()
-        env["METASHAPE_PROJECT_NAME"] = nombre
-        env["METASHAPE_CONTOUR_INTERVAL"] = str(float(intervalo_m))
-        env["METASHAPE_MAJOR_CONTOUR_INTERVAL"] = str(float(intervalo_maestra_m))
-        runtime_state.process = subprocess.Popen(
-            [METASHAPE_EXE, "-r", CONTOURS_SCRIPT],
-            cwd=BASE_DIR,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            encoding="utf-8",
-            errors="replace",
-        )
-        runtime_state.reader_thread = threading.Thread(
-            target=reader_loop, args=(runtime_state.process, "contours"), daemon=True
-        )
-
-        runtime_state.reader_thread.start()
-
-    runtime_state.push_log("Solicitud de generacion de curvas recibida")
-    return {
-        "ok": True,
-        "message": f"Generacion iniciada: delgadas cada {intervalo_m:g} m, maestras cada {intervalo_maestra_m:g} m",
-        "nombre_proyecto": nombre,
-        "intervalo_m": intervalo_m,
-        "intervalo_maestra_m": intervalo_maestra_m,
     }
 
 

@@ -14,19 +14,22 @@ import gdown
 from fastapi import HTTPException
 from PIL import ExifTags, Image
 
-from backend.config import RUTA_IMAGENES
-
 import backend.runtime as runtime
+from backend.core.paths import DATASET_DIR
+
+
+def _ruta_imagenes():
+    return runtime.active_dataset_dir()
 
 
 def _asegurar_directorio_imagenes():
-    os.makedirs(RUTA_IMAGENES, exist_ok=True)
+    os.makedirs(_ruta_imagenes(), exist_ok=True)
 
 
 def _limpiar_directorio_imagenes():
     _asegurar_directorio_imagenes()
-    for nombre in os.listdir(RUTA_IMAGENES):
-        ruta = os.path.join(RUTA_IMAGENES, nombre)
+    for nombre in os.listdir(_ruta_imagenes()):
+        ruta = os.path.join(_ruta_imagenes(), nombre)
         if os.path.isdir(ruta):
             shutil.rmtree(ruta)
         else:
@@ -99,22 +102,19 @@ def _obtener_gps_de_imagen(ruta_imagen):
 
 
 def _actualizar_puntos_gps_desde_dataset():
+    _asegurar_directorio_imagenes()
     puntos = []
-    for nombre in sorted(os.listdir(RUTA_IMAGENES)):
-        ruta = os.path.join(RUTA_IMAGENES, nombre)
-        if not os.path.isfile(ruta) or not _es_imagen_valida(nombre):
-            continue
-        gps = _obtener_gps_de_imagen(ruta)
-        if not gps:
-            continue
-        latitud, longitud = gps
-        puntos.append(
-            {
-                "nombre": nombre,
-                "lat": latitud,
-                "lon": longitud,
-            }
-        )
+    for root, dirs, files in os.walk(_ruta_imagenes()):
+        if os.path.normcase(os.path.abspath(root)) == os.path.normcase(os.path.abspath(DATASET_DIR)):
+            dirs.clear()
+        for nombre in sorted(files):
+            if not _es_imagen_valida(nombre):
+                continue
+            gps = _obtener_gps_de_imagen(os.path.join(root, nombre))
+            if not gps:
+                continue
+            latitud, longitud = gps
+            puntos.append({"nombre": nombre, "lat": latitud, "lon": longitud})
 
     centro = None
     if puntos:
@@ -131,7 +131,9 @@ def _contar_imagenes_en_directorio():
     _asegurar_directorio_imagenes()
     archivos = []
     imagenes_validas = []
-    for root, _, files in os.walk(RUTA_IMAGENES):
+    for root, dirs, files in os.walk(_ruta_imagenes()):
+        if os.path.normcase(os.path.abspath(root)) == os.path.normcase(os.path.abspath(DATASET_DIR)):
+            dirs.clear()
         for nombre in files:
             ruta = os.path.join(root, nombre)
             archivos.append(ruta)
@@ -161,7 +163,7 @@ def _extraer_zip_a_dataset(zip_obj):
                 if not _es_imagen_valida(nombre):
                     continue
 
-                destino = os.path.join(RUTA_IMAGENES, nombre)
+                destino = os.path.join(_ruta_imagenes(), nombre)
                 with zf.open(info) as origen, open(destino, "wb") as salida:
                     shutil.copyfileobj(origen, salida)
                 imagenes_validas += 1
@@ -254,7 +256,7 @@ def _descargar_carpeta_rclone(ruta_remota):
                     destino_nombre = f"{base}_{contador}{extension}"
                     contador += 1
                 usados.add(destino_nombre.lower())
-                shutil.copy2(ruta_origen, os.path.join(RUTA_IMAGENES, destino_nombre))
+                shutil.copy2(ruta_origen, os.path.join(_ruta_imagenes(), destino_nombre))
                 imagenes_validas += 1
 
             if imagenes_validas == 0 and archivos_zip:
@@ -382,7 +384,7 @@ def _descargar_carpeta_drive(url):
                         destino_nombre = f"{base}_{contador}{extension}"
                         contador += 1
                     usados.add(destino_nombre.lower())
-                    shutil.copy2(ruta_origen, os.path.join(RUTA_IMAGENES, destino_nombre))
+                    shutil.copy2(ruta_origen, os.path.join(_ruta_imagenes(), destino_nombre))
                     imagenes_validas += 1
 
             # Si la carpeta contiene un ZIP, procesarlo como una carga anidada.

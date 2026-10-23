@@ -26,11 +26,17 @@ from backend.services.overlay import (
     _ruta_ortomosaico_rgb,
 )
 from backend.services.vector_overlay import cargar_y_sincronizar_desde_upload, guardar_roi_dibujado, recuperar_recorte_guardado
-from backend.services.contours import eliminar_curvas_nivel, estado_curvas_nivel, geojson_curvas_nivel
-from backend.services.process import detener_proceso, iniciar_curvas_nivel, iniciar_proceso
+from backend.services.process import detener_proceso, iniciar_proceso
+from backend.services.projects import (
+    catalog_status, create_project, prepare_dataset_upload, select_dataset, select_project,
+)
 from backend.core.paths import CLIP_GEOJSON
 
 router = APIRouter()
+
+
+def _clip_path():
+    return runtime_state.active_clip_path() if runtime_state.snapshot_ingesta_info().get("project_id") else CLIP_GEOJSON
 
 
 @router.get("/_old_root")
@@ -89,19 +95,6 @@ def overlay_rgb_png():
     return Response(content=contenido, media_type="image/png")
 
 
-@router.get("/overlay/contours/status")
-def overlay_contours_status():
-    return estado_curvas_nivel()
-
-
-@router.get("/overlay/contours.geojson")
-def overlay_contours_geojson():
-    geojson = geojson_curvas_nivel()
-    if geojson is None:
-        raise HTTPException(status_code=404, detail="Curvas de nivel no disponibles")
-    return Response(content=json.dumps(geojson), media_type="application/geo+json")
-
-
 @router.get("/overlay/ms/status")
 def overlay_ms_status():
     ruta = _ruta_ortomosaico_ms()
@@ -135,7 +128,7 @@ def overlay_shapefile_status():
         "superficie_m2": superficie_m2,
         "superficie_ha": superficie_ha,
         "feature_count": feature_count,
-        "recorte_activo": os.path.exists(CLIP_GEOJSON),
+        "recorte_activo": os.path.exists(_clip_path()),
     }
 
 
@@ -191,8 +184,8 @@ def quitar_recorte():
     with runtime_state.lock:
         if runtime_state.state.get("running"):
             raise HTTPException(status_code=409, detail="Espera a que termine el procesamiento para quitar el recorte")
-        if os.path.exists(CLIP_GEOJSON):
-            os.remove(CLIP_GEOJSON)
+        if os.path.exists(_clip_path()):
+            os.remove(_clip_path())
     return {"ok": True, "mensaje": "Recorte desactivado. Vuelve a procesar para obtener ortomosaicos completos"}
 
 
@@ -222,6 +215,8 @@ def estado_ingesta():
         "puntos_gps": info.get("puntos_gps", []),
         "centro_gps": info.get("centro_gps"),
         "nombre_proyecto": info.get("nombre_proyecto") or "test_agisoft",
+        "project_id": info.get("project_id"),
+        "dataset_id": info.get("dataset_id"),
         "camera_model": info.get("camera_model") or "mavic_3_rgb",
     }
 
@@ -236,24 +231,22 @@ def guardar_nombre_proyecto(nombre: str = Form(...)):
 
 @router.post("/proyecto/nuevo")
 def nuevo_proyecto(nombre: str = Form(None), camera_model: str = Form(None)):
-    with runtime_state.lock:
-        if runtime_state.state.get("running"):
-            raise HTTPException(status_code=409, detail="No puedes reiniciar mientras hay un proceso en ejecucion")
+    return create_project(nombre, camera_model)
 
-    runtime_state.limpiar_salidas_proyecto()
-    runtime_state.reset_runtime_state()
 
-    nombre_limpio = runtime_state.sanitizar_nombre_proyecto(nombre) if nombre else runtime_state.DEFAULT_INGESTA_INFO["nombre_proyecto"]
-    modelo_limpio = runtime_state.normalizar_modelo_camara(camera_model) if camera_model else runtime_state.DEFAULT_INGESTA_INFO["camera_model"]
+@router.get("/proyectos")
+def proyectos():
+    return catalog_status()
 
-    runtime_state.update_ingesta_info(nombre_proyecto=nombre_limpio, camera_model=modelo_limpio)
-    runtime_state.update_state(message="Nuevo proyecto listo")
-    return {
-        "ok": True,
-        "mensaje": "Proyecto reiniciado",
-        "nombre_proyecto": nombre_limpio,
-        "camera_model": modelo_limpio,
-    }
+
+@router.post("/proyectos/seleccionar")
+def seleccionar_proyecto(project_id: str = Form(...)):
+    return select_project(project_id)
+
+
+@router.post("/datasets/seleccionar")
+def seleccionar_dataset(dataset_id: str = Form(...)):
+    return select_dataset(dataset_id)
 
 
 @router.post("/ingesta/zip")
@@ -268,10 +261,18 @@ async def ingesta_zip(file: UploadFile = File(None), archivo: UploadFile = File(
         contenido = await upload.read()
         if not contenido:
             raise HTTPException(status_code=400, detail="El ZIP esta vacio")
-        total_archivos, imagenes_validas = _extraer_zip_a_dataset(BytesIO(contenido))
+        anterior = runtime_state.snapshot_ingesta_info()
+        dataset_id = prepare_dataset_upload(upload.filename)
+        try:
+            total_archivos, imagenes_validas = _extraer_zip_a_dataset(BytesIO(contenido))
+            select_dataset(dataset_id)
+        except Exception:
+            runtime_state.update_ingesta_info(**anterior)
+            raise
         return {
             "ok": True,
-            "mensaje": "ZIP procesado y extraido en dataset/",
+            "mensaje": f"Dataset {dataset_id} cargado y seleccionado",
+            "dataset_id": dataset_id,
             "total_archivos": total_archivos,
             "imagenes_validas": imagenes_validas,
         }
@@ -281,18 +282,26 @@ async def ingesta_zip(file: UploadFile = File(None), archivo: UploadFile = File(
 
 @router.post("/ingesta/drive")
 def ingesta_drive(url: str = Form(...)):
-    if _es_ruta_rclone(url):
-        total_archivos, imagenes_validas = _descargar_carpeta_rclone(url)
-    else:
-        _file_id, es_carpeta = _extraer_id_drive(url)
-        if es_carpeta:
-            total_archivos, imagenes_validas = _descargar_carpeta_drive(url)
+    anterior = runtime_state.snapshot_ingesta_info()
+    dataset_id = prepare_dataset_upload("drive")
+    try:
+        if _es_ruta_rclone(url):
+            total_archivos, imagenes_validas = _descargar_carpeta_rclone(url)
         else:
-            zip_buffer = _descargar_zip_drive(url)
-            total_archivos, imagenes_validas = _extraer_zip_a_dataset(zip_buffer)
+            _file_id, es_carpeta = _extraer_id_drive(url)
+            if es_carpeta:
+                total_archivos, imagenes_validas = _descargar_carpeta_drive(url)
+            else:
+                zip_buffer = _descargar_zip_drive(url)
+                total_archivos, imagenes_validas = _extraer_zip_a_dataset(zip_buffer)
+        select_dataset(dataset_id)
+    except Exception:
+        runtime_state.update_ingesta_info(**anterior)
+        raise
     return {
         "ok": True,
-        "mensaje": "Carpeta o ZIP de Drive descargado y extraido en dataset/",
+        "mensaje": f"Dataset {dataset_id} cargado y seleccionado",
+        "dataset_id": dataset_id,
         "total_archivos": total_archivos,
         "imagenes_validas": imagenes_validas,
     }
@@ -316,23 +325,6 @@ def start(nombre_proyecto: str = Form(None), camera_model: str = Form(None)):
 @router.post("/stop")
 def stop():
     return detener_proceso()
-
-
-@router.post("/overlay/contours/generate")
-def generate_contours(payload: dict | None = None):
-    payload = payload or {}
-    return iniciar_curvas_nivel(
-        intervalo_m=payload.get("intervalo_m", 5),
-        intervalo_maestra_m=payload.get("intervalo_maestra_m", 25),
-    )
-
-
-@router.delete("/overlay/contours")
-def delete_contours():
-    try:
-        return eliminar_curvas_nivel()
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/{requested_path:path}", include_in_schema=False)

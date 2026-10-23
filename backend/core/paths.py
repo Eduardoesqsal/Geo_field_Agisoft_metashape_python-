@@ -20,4 +20,3 @@ METASHAPE_EXE = os.environ.get(
     r"C:\Program Files\Agisoft\Metashape Pro\metashape.exe",
 ).strip()
 MAIN_SCRIPT = os.path.join(BASE_DIR, "backend", "main.py")
-CONTOURS_SCRIPT = os.path.join(BASE_DIR, "backend", "contours_main.py")

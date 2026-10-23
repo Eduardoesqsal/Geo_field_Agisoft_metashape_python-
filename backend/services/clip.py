@@ -14,20 +14,31 @@ from rasterio.windows import Window, transform as window_transform
 from backend.core.paths import CLIP_GEOJSON
 
 
-def recortar_ortomosaico(ruta, limite=CLIP_GEOJSON):
+def recortar_ortomosaico(ruta, limite=CLIP_GEOJSON, salida=None, indice=None):
     if not os.path.isfile(limite):
         return False
 
     with open(limite, encoding="utf-8") as archivo:
         contenido = json.load(archivo)
-    geometrias = [
-        feature["geometry"] for feature in contenido.get("features", [])
-        if feature.get("geometry", {}).get("type") in {"Polygon", "MultiPolygon"}
-    ]
+    geometrias = []
+    for feature in contenido.get("features", []):
+        geometria = feature.get("geometry") or {}
+        if geometria.get("type") == "Polygon":
+            geometrias.append(geometria)
+        elif geometria.get("type") == "MultiPolygon":
+            geometrias.extend(
+                {"type": "Polygon", "coordinates": coordenadas}
+                for coordenadas in geometria.get("coordinates", [])
+            )
     if not geometrias:
         raise RuntimeError("El ROI de recorte no contiene poligonos")
+    if indice is not None:
+        if not 0 <= indice < len(geometrias):
+            raise IndexError("El indice del poligono no existe en el recorte")
+        geometrias = [geometrias[indice]]
 
-    temporal = ruta + ".recorte.tmp.tif"
+    destino_final = salida or ruta
+    temporal = destino_final + ".recorte.tmp.tif"
     try:
         with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=True), rasterio.open(ruta) as origen:
             if origen.crs is None:
@@ -53,6 +64,12 @@ def recortar_ortomosaico(ruta, limite=CLIP_GEOJSON):
             perfil.pop("blockysize", None)
             perfil["tiled"] = True
             tiene_datos = False
+            banda_alpha = (
+                origen.count
+                if (origen.colorinterp[-1] == rasterio.enums.ColorInterp.alpha
+                    or (origen.descriptions[-1] or "").strip().lower() == "alpha")
+                else None
+            )
             with rasterio.open(temporal, "w", **perfil) as destino:
                 destino.colorinterp = origen.colorinterp
                 destino.update_tags(**origen.tags())
@@ -72,15 +89,19 @@ def recortar_ortomosaico(ruta, limite=CLIP_GEOJSON):
                         transform=window_transform(entrada, origen.transform),
                         invert=True,
                     )
-                    valido = dentro & (origen.dataset_mask(window=entrada) > 0)
+                    mascara_origen = (
+                        origen.read(banda_alpha, window=entrada)
+                        if banda_alpha is not None
+                        else origen.dataset_mask(window=entrada)
+                    )
+                    valido = dentro & (mascara_origen > 0)
                     tiene_datos = tiene_datos or bool(np.any(valido))
                     datos = origen.read(window=entrada)
                     relleno = origen.nodata if origen.nodata is not None else 0
                     datos[:, ~valido] = relleno
                     # Solo la banda Alpha explicita es transparencia. En el
                     # ortomosaico Mavic 3M de cuatro bandas, la ultima es NIR.
-                    if (origen.colorinterp[-1] == rasterio.enums.ColorInterp.alpha
-                            or (origen.descriptions[-1] or "").strip().lower() == "alpha"):
+                    if banda_alpha is not None:
                         datos[-1, ~valido] = 0
                     destino.write(datos, window=salida)
                     destino.write_mask(np.where(valido, 255, 0).astype("uint8"), window=salida)
@@ -88,7 +109,7 @@ def recortar_ortomosaico(ruta, limite=CLIP_GEOJSON):
                 raise RuntimeError("El ROI de recorte no cubre pixeles validos del ortomosaico")
         for intento in range(5):
             try:
-                os.replace(temporal, ruta)
+                os.replace(temporal, destino_final)
                 break
             except PermissionError:
                 if intento == 4:

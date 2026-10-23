@@ -1,11 +1,17 @@
 # Uso local de Metashape
 
+## Varios proyectos y datasets
+
+En **Controles**, elige un dataset existente o carga otro ZIP/Drive. Cada carga nueva se guarda en una subcarpeta de `dataset/`; las fotos anteriores siguen disponibles en **Dataset de fotos**. El dataset original de la raiz de `dataset/` aparece como **Dataset original**.
+
+Escribe un nombre y pulsa **Nuevo proyecto** para crear una carpeta independiente en `proyecto/<nombre>/`. **Proyectos guardados** permite volver a abrir un resultado anterior en el mapa sin reiniciar el servidor. Si pulsas **Procesar** otra vez sobre un proyecto ya procesado, se crea una carpeta nueva con sufijo (`<nombre>_2`, `<nombre>_3`, etc.) y se conserva el resultado anterior. El dataset seleccionado se reutiliza sin subirlo de nuevo. El recorte del proyecto anterior se copia a la nueva ejecucion.
+
 Cada computadora ejecuta su propia copia del proyecto y guarda sus archivos en `dataset/`, `proyecto/` y `logs/` de esa misma computadora. El servidor escucha únicamente en `127.0.0.1:8001`. No requiere Redis, Docker, workers, ngrok ni Render.
 
 ## Preparación en Windows
 
-1. Instala Python 3.11, Node.js 20 o superior y Agisoft Metashape Pro en la computadora.
-2. En la raíz del proyecto, ejecuta `python -m pip install -r requirements.txt`.
+1. Instala Python 3.14, Node.js 20 o superior y Agisoft Metashape Pro en la computadora.
+2. En la raíz del proyecto, comprueba con `python --version` que estás usando Python 3.14 y ejecuta `python -m pip install -r requirements.txt`.
 3. En `frontend/`, ejecuta `corepack pnpm install` y después `corepack pnpm build`.
 4. Vuelve a la raíz del proyecto y ejecuta `python app.py`. Deja esa terminal abierta y entra a `http://127.0.0.1:8001` en esa misma computadora.
 

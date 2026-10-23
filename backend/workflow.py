@@ -1,5 +1,8 @@
+import json
 import os
+import re
 import time
+import uuid
 from collections import defaultdict
 
 import numpy as np
@@ -12,29 +15,23 @@ except Exception:
     rasterio = None
 
 from backend.config import (
-    RUTA_CURVAS_NIVEL,
+    CLIP_GEOJSON,
     RUTA_DEM_SIN_CLASIFICAR,
-    RUTA_DEM_SUELO,
     RUTA_IMAGENES,
     RUTA_ORTOMOSAICO_MS,
     RUTA_ORTOMOSAICO_RGB,
     RUTA_PROYECTO,
 )
-from backend.core.paths import CLIP_GEOJSON
+from backend.core.paths import DATASET_DIR
+from backend.services.clip import recortar_ortomosaico
 
 
 class ProcesamientoMetashape:
     REDEDGE_RGB_STRETCH = (2, 98)
     REDEDGE_RGB_GAMMA = 1.15
-    DEPTH_MAP_DOWNSCALE = 2
-    # Perfil conservador: prioriza un MDT limpio aunque deje huecos que
-    # Metashape deba interpolar. Todos los valores estan expresados en las
-    # unidades que usa classifyGroundPoints (grados y metros).
-    GROUND_MAX_ANGLE = 8.0
-    GROUND_MAX_DISTANCE = 0.35
-    GROUND_MAX_TERRAIN_SLOPE = 25.0
-    GROUND_CELL_SIZE = 15.0
-    GROUND_EROSION_RADIUS = 0.50
+    ALIGNMENT_DOWNSCALE = 4
+    DEM_RESOLUTION_METERS = 0.5
+    ORTHOMOSAIC_RESOLUTION_METERS = 0.2
 
     def __init__(self, progress_callback=None, camera_model=None):
         self.doc = None
@@ -63,20 +60,6 @@ class ProcesamientoMetashape:
             "micasense_rededge-m": "rededge_m",
         }
         return alias.get(modelo, "mavic_3_rgb")
-
-    def _parametro_suelo(self, nombre, predeterminado, minimo=0.0):
-        """Permite afinar el filtro sin modificar el codigo del pipeline."""
-        variable = f"METASHAPE_GROUND_{nombre}"
-        valor = os.environ.get(variable)
-        if valor in (None, ""):
-            return predeterminado
-        try:
-            numero = float(valor)
-        except ValueError as exc:
-            raise RuntimeError(f"{variable} debe ser un numero; recibido: {valor}") from exc
-        if numero < minimo:
-            raise RuntimeError(f"{variable} debe ser mayor o igual que {minimo:g}")
-        return numero
 
     def _es_solo_rgb(self):
         return self.camera_model == "mavic_3_rgb"
@@ -176,15 +159,18 @@ class ProcesamientoMetashape:
     def _clasificar_dataset(self):
         rgb = []
         ms = []
-        for nombre in sorted(os.listdir(RUTA_IMAGENES)):
-            ruta = os.path.join(RUTA_IMAGENES, nombre)
-            if not os.path.isfile(ruta) or not self._es_imagen(nombre):
-                continue
-            ext = os.path.splitext(nombre.lower())[1]
-            if ext in {".jpg", ".jpeg"}:
-                rgb.append(ruta)
-            elif not self._es_solo_rgb():
-                ms.append(ruta)
+        for root, dirs, files in os.walk(RUTA_IMAGENES):
+            if os.path.normcase(os.path.abspath(root)) == os.path.normcase(os.path.abspath(DATASET_DIR)):
+                dirs.clear()
+            for nombre in sorted(files):
+                ruta = os.path.join(root, nombre)
+                if not self._es_imagen(nombre):
+                    continue
+                ext = os.path.splitext(nombre.lower())[1]
+                if ext in {".jpg", ".jpeg"}:
+                    rgb.append(ruta)
+                elif not self._es_solo_rgb():
+                    ms.append(ruta)
         return rgb, ms
 
     def cargar_fotos(self):
@@ -217,13 +203,13 @@ class ProcesamientoMetashape:
         self._guardar_documento(RUTA_PROYECTO)
 
     def alinear_camaras(self):
-        self._log("[2/5] Alineando camaras")
+        self._log("[2/5] Alineando camaras en calidad baja")
         Metashape = self._ms()
         for chunk in self._obtener_chunks():
             if not chunk.cameras:
                 continue
             kwargs = {
-                "downscale": 1,
+                "downscale": self.ALIGNMENT_DOWNSCALE,
                 "generic_preselection": True,
                 "reference_preselection": True,
             }
@@ -235,22 +221,15 @@ class ProcesamientoMetashape:
                 pass
         self._guardar_documento()
 
-    def _tiene_nube_de_puntos(self, chunk):
-        cloud = getattr(chunk, "point_cloud", None)
-        if cloud is not None:
-            return True
-        nubes = getattr(chunk, "point_clouds", None)
-        return bool(nubes)
-
-    def _ruta_dem(self, chunk, tipo):
+    def _ruta_dem(self, chunk):
         etiqueta = (getattr(chunk, "label", "") or "").strip().lower()
         if etiqueta == "rgb":
-            return RUTA_DEM_SUELO if tipo == "suelo" else RUTA_DEM_SIN_CLASIFICAR
+            return RUTA_DEM_SIN_CLASIFICAR
 
         proyecto_dir = os.path.dirname(RUTA_PROYECTO)
         nombre_base = os.path.splitext(os.path.basename(RUTA_PROYECTO))[0]
         sufijo_chunk = etiqueta or "chunk"
-        return os.path.join(proyecto_dir, f"{nombre_base}_{sufijo_chunk}_dem_{tipo}.tif")
+        return os.path.join(proyecto_dir, f"{nombre_base}_{sufijo_chunk}_dem_sin_clasificar.tif")
 
     def _exportar_dem(self, chunk, elevation, ruta):
         elevation_data = self._enum("DataSource.ElevationData", "ElevationData")
@@ -268,105 +247,29 @@ class ProcesamientoMetashape:
         finally:
             chunk.elevation = elevation_anterior
 
-    def _dem_nuevo(self, chunk, claves_anteriores):
-        elevaciones = list(getattr(chunk, "elevations", []) or [])
-        for elevation in reversed(elevaciones):
-            clave = getattr(elevation, "key", id(elevation))
-            if clave not in claves_anteriores:
-                return elevation
-        return getattr(chunk, "elevation", None)
-
     def construir_mde(self):
-        self._log("[3/5] Construyendo DEM sin clasificar y DEM de suelo")
-        point_cloud_data = self._enum("DataSource.PointCloudData", "PointCloudData")
-        ground_class = self._enum("PointClass.Ground")
-        mild_filtering = self._enum("FilterMode.MildFiltering", "MildFiltering")
-        if point_cloud_data is None or ground_class is None:
-            raise RuntimeError("La version de Metashape no admite un MDT filtrado por clase Ground")
+        self._log(f"[3/5] Construyendo DEM desde puntos de paso ({self.DEM_RESOLUTION_METERS:g} m/pixel)")
+        tie_points_data = self._enum("DataSource.TiePointsData", "TiePointsData")
+        if tie_points_data is None:
+            raise RuntimeError("La version de Metashape no admite construir el DEM desde puntos de paso")
 
         for chunk in self._obtener_chunks():
             if not chunk.cameras or (getattr(chunk, "label", "") or "").strip().lower() not in {"rgb", "ms"}:
                 continue
             etiqueta = getattr(chunk, "label", "chunk")
-            if not self._tiene_nube_de_puntos(chunk):
-                self._log(f"[3/5] Generando mapas de profundidad: {etiqueta}")
-                depth_kwargs = {"downscale": self.DEPTH_MAP_DOWNSCALE}
-                if mild_filtering is not None:
-                    depth_kwargs["filter_mode"] = mild_filtering
-                chunk.buildDepthMaps(**depth_kwargs)
-
-                self._log(f"[3/5] Generando nube de puntos densa: {etiqueta}")
-                chunk.buildPointCloud(point_colors=True, point_confidence=True)
-
-            cloud = getattr(chunk, "point_cloud", None)
-            if cloud is None or not hasattr(cloud, "classifyGroundPoints"):
-                raise RuntimeError(f"No se pudo crear o clasificar la nube de puntos de {etiqueta}")
-
-            self._log(f"[3/5] Construyendo DEM con todos los puntos: {etiqueta}")
-            chunk.buildDem(source_data=point_cloud_data)
-            dem_sin_clasificar = chunk.elevation
-            dem_sin_clasificar.label = "DEM - Todos los puntos (sin clasificar)"
-            ruta_sin_clasificar = self._ruta_dem(chunk, "sin_clasificar")
-            self._exportar_dem(chunk, dem_sin_clasificar, ruta_sin_clasificar)
-            self._log(f"[3/5] DEM sin clasificar exportado: {ruta_sin_clasificar}")
-
-            self._log(f"[3/5] Clasificando puntos de terreno natural: {etiqueta}")
-            classification_kwargs = {
-                "max_angle": self._parametro_suelo("MAX_ANGLE", self.GROUND_MAX_ANGLE),
-                "max_distance": self._parametro_suelo("MAX_DISTANCE", self.GROUND_MAX_DISTANCE),
-                "max_terrain_slope": self._parametro_suelo(
-                    "MAX_TERRAIN_SLOPE", self.GROUND_MAX_TERRAIN_SLOPE
-                ),
-                "cell_size": self._parametro_suelo("CELL_SIZE", self.GROUND_CELL_SIZE, minimo=0.01),
-                "erosion_radius": self._parametro_suelo(
-                    "EROSION_RADIUS", self.GROUND_EROSION_RADIUS
-                ),
-                "keep_existing": False,
-            }
-            self._log(
-                "[3/5] Filtro Ground: "
-                f"angulo={classification_kwargs['max_angle']:g} grados, "
-                f"distancia={classification_kwargs['max_distance']:g} m, "
-                f"pendiente={classification_kwargs['max_terrain_slope']:g} grados, "
-                f"celda={classification_kwargs['cell_size']:g} m, "
-                f"erosion={classification_kwargs['erosion_radius']:g} m"
-            )
-            try:
-                cloud.classifyGroundPoints(**classification_kwargs)
-            except TypeError as exc:
-                # Metashape 2.0/2.1 no incluye max_terrain_slope.
-                if "max_terrain_slope" not in str(exc):
-                    raise
-                classification_kwargs.pop("max_terrain_slope")
-                cloud.classifyGroundPoints(**classification_kwargs)
-
-            puntos_por_clase = getattr(cloud, "point_count_by_class", None)
-            if isinstance(puntos_por_clase, dict) and puntos_por_clase.get(ground_class) == 0:
-                raise RuntimeError(f"La clasificacion no encontro puntos de terreno en {etiqueta}")
-
-            self._log(f"[3/5] Construyendo MDT solo con clase Ground: {etiqueta}")
-            claves_dem_anteriores = {
-                getattr(elevation, "key", id(elevation))
-                for elevation in (getattr(chunk, "elevations", []) or [])
-            }
-            chunk.buildDem(
-                source_data=point_cloud_data,
-                classes=[ground_class],
-                replace_asset=False,
-            )
-            dem_suelo = self._dem_nuevo(chunk, claves_dem_anteriores)
-            if dem_suelo is None:
-                raise RuntimeError(f"Metashape no creo el DEM de suelo para {etiqueta}")
-            dem_suelo.label = "DEM - Suelo clasificado (Ground)"
-            ruta_suelo = self._ruta_dem(chunk, "suelo")
-            self._exportar_dem(chunk, dem_suelo, ruta_suelo)
-            # El DEM de suelo debe quedar activo para ortomosaico y curvas.
-            chunk.elevation = dem_suelo
-            self._log(f"[3/5] DEM de suelo exportado y activado: {ruta_suelo}")
+            self._log(f"[3/5] Construyendo DEM con puntos de paso: {etiqueta}")
+            chunk.buildDem(source_data=tie_points_data, resolution=self.DEM_RESOLUTION_METERS)
+            dem = getattr(chunk, "elevation", None)
+            if dem is None:
+                raise RuntimeError(f"Metashape no creo el DEM de {etiqueta}")
+            dem.label = "DEM - Puntos de paso"
+            ruta_dem = self._ruta_dem(chunk)
+            self._exportar_dem(chunk, dem, ruta_dem)
+            self._log(f"[3/5] DEM exportado: {ruta_dem}")
         self._guardar_documento()
 
     def construir_ortomosaico(self):
-        self._log("[4/5] Construyendo ortomosaico")
+        self._log("[4/5] Construyendo ortomosaicos")
         elevation_data = self._enum("DataSource.ElevationData", "ElevationData")
         model_data = self._enum("DataSource.ModelData", "ModelData")
         chunk_rgb = next(
@@ -380,20 +283,23 @@ class ProcesamientoMetashape:
             etiqueta = (getattr(chunk, "label", "") or "").strip().lower()
             if etiqueta == "ms" and self.camera_model == "mavic_3m":
                 dem_ms = getattr(chunk, "elevation", None)
-                if elevation_data is None or dem_ms is None or getattr(dem_ms, "label", "") != "DEM - Suelo clasificado (Ground)":
-                    raise RuntimeError("El ortomosaico MS necesita su propio DEM de suelo clasificado")
+                if elevation_data is None or dem_ms is None:
+                    raise RuntimeError("El ortomosaico MS necesita su propio DEM")
                 # Igual que RGB: el DEM activo del mismo chunk es la superficie
                 # y Metashape decide el mosaico y la resolucion nativa.
-                chunk.buildOrthomosaic(surface_data=elevation_data)
+                chunk.buildOrthomosaic(
+                    surface_data=elevation_data,
+                    resolution=self.ORTHOMOSAIC_RESOLUTION_METERS,
+                )
                 self._log("[4/5] Ortofoto construida con DEM MS propio: MS")
                 continue
             if etiqueta == "ms":
-                if chunk_rgb is None or not os.path.isfile(RUTA_DEM_SUELO):
-                    raise RuntimeError("El ortomosaico MS requiere fotos RGB para usar su DEM de suelo")
+                if chunk_rgb is None or not os.path.isfile(RUTA_DEM_SIN_CLASIFICAR):
+                    raise RuntimeError("El ortomosaico MS requiere fotos RGB para usar su DEM")
                 if elevation_data is None:
                     raise RuntimeError("Metashape no admite importar el DEM RGB")
                 opciones_importacion = {
-                    "path": RUTA_DEM_SUELO,
+                    "path": RUTA_DEM_SIN_CLASIFICAR,
                     "raster_type": elevation_data,
                     "nodata_value": -32767,
                     "has_nodata_value": True,
@@ -405,17 +311,20 @@ class ProcesamientoMetashape:
                 if getattr(chunk, "elevation", None) is None:
                     raise RuntimeError("No se pudo activar el DEM RGB en el chunk MS")
                 self._log("[4/5] DEM RGB importado en MS para construir el ortomosaico")
+            resolucion = 0 if etiqueta == "rgb" else self.ORTHOMOSAIC_RESOLUTION_METERS
+            opciones_rgb = {"refine_seamlines": True} if etiqueta == "rgb" else {}
             try:
-                kwargs = {}
+                kwargs = {"resolution": resolucion, **opciones_rgb}
                 if elevation_data is not None:
                     kwargs["surface_data"] = elevation_data
                 chunk.buildOrthomosaic(**kwargs)
             except Exception:
-                kwargs = {}
+                kwargs = {"resolution": resolucion, **opciones_rgb}
                 if model_data is not None:
                     kwargs["surface_data"] = model_data
                 chunk.buildOrthomosaic(**kwargs)
-            self._log(f"[4/5] Ortofoto construida: {getattr(chunk, 'label', 'chunk')}")
+            calidad = "resolucion nativa y uniones refinadas" if etiqueta == "rgb" else "calidad baja"
+            self._log(f"[4/5] Ortofoto construida ({calidad}): {getattr(chunk, 'label', 'chunk')}")
         self._guardar_documento()
 
     def _proyeccion_utm_ms(self, chunk):
@@ -591,9 +500,24 @@ class ProcesamientoMetashape:
         }
         exportados = []
         usar_roi = os.path.isfile(CLIP_GEOJSON)
+        poligonos_shapefile = 0
+        if usar_roi:
+            with open(CLIP_GEOJSON, encoding="utf-8") as archivo:
+                recorte = json.load(archivo)
+            if (recorte.get("_recorte") or {}).get("formato") == "shp":
+                poligonos_shapefile = sum(
+                    1 if (feature.get("geometry") or {}).get("type") == "Polygon"
+                    else len((feature.get("geometry") or {}).get("coordinates", []))
+                    if (feature.get("geometry") or {}).get("type") == "MultiPolygon"
+                    else 0
+                    for feature in recorte.get("features", [])
+                )
+                if not poligonos_shapefile:
+                    raise RuntimeError("El shapefile de recorte no contiene poligonos")
+        recorte_metashape = usar_roi and not poligonos_shapefile
         limite_exterior = None
         formato_geojson = None
-        if usar_roi:
+        if recorte_metashape:
             limite_exterior = self._enum("Shape.BoundaryType.OuterBoundary", "Shape.OuterBoundary")
             formato_geojson = self._enum("ShapesFormat.ShapesFormatGeoJSON", "ShapesFormatGeoJSON")
             if limite_exterior is None or formato_geojson is None:
@@ -620,6 +544,7 @@ class ProcesamientoMetashape:
 
             kwargs = {"path": destino}
             kwargs.update(opciones or {})
+            kwargs["resolution"] = 0 if (getattr(chunk, "label", "") or "").strip().lower() == "rgb" else self.ORTHOMOSAIC_RESOLUTION_METERS
             if orthomosaic_data is not None:
                 kwargs["source_data"] = orthomosaic_data
             if compression is not None and usar_compresion:
@@ -628,7 +553,7 @@ class ProcesamientoMetashape:
                 kwargs["save_alpha"] = save_alpha
             if white_background is not None:
                 kwargs["white_background"] = white_background
-            kwargs["clip_to_boundary"] = usar_roi
+            kwargs["clip_to_boundary"] = recorte_metashape
 
             _borrar_si_existe(destino)
             try:
@@ -661,7 +586,7 @@ class ProcesamientoMetashape:
                 )
 
             try:
-                if usar_roi:
+                if recorte_metashape:
                     chunk.importShapes(
                         path=CLIP_GEOJSON,
                         boundary_type=limite_exterior,
@@ -670,7 +595,15 @@ class ProcesamientoMetashape:
                     )
                     self._log(f"[5/5] ROI cargado en Metashape como limite exterior: {etiqueta.upper()}")
                 opciones_ms, epsg_ms = self._opciones_exportacion_ms(chunk) if etiqueta == "ms" else ({}, None)
-                fuente_ms = f"{destino}.metashape_raw.tif" if etiqueta == "ms" and self.camera_model == "mavic_3m" else destino
+                fuente_recorte = (
+                    f"{destino}.{uuid.uuid4().hex}.sin_recorte.tif"
+                    if poligonos_shapefile else destino
+                )
+                fuente_ms = (
+                    f"{fuente_recorte}.metashape_raw.tif"
+                    if etiqueta == "ms" and self.camera_model == "mavic_3m"
+                    else fuente_recorte
+                )
                 exportado = _exportar_chunk(
                     chunk,
                     fuente_ms,
@@ -681,26 +614,47 @@ class ProcesamientoMetashape:
 
                 if etiqueta == "ms" and exportado and self.camera_model == "mavic_3m":
                     self._verificar_exportacion_ms(
-                        fuente_ms, epsg_ms, radiometric_correction="sun_sensor", destino=destino
+                        fuente_ms, epsg_ms, radiometric_correction="sun_sensor", destino=fuente_recorte
                     )
                     self._log("[5/5] MS: GeoTIFF con 4 bandas Green/Red/RedEdge/NIR y Alpha")
 
-                if etiqueta == "rgb" and exportado and not self._raster_tiene_datos_utiles(destino):
+                if etiqueta == "rgb" and exportado and not self._raster_tiene_datos_utiles(fuente_recorte):
                     self._log("[5/5] El TIFF RGB salio vacio; reintentando exportacion sin compresion")
                     exportado = _exportar_chunk(
                         chunk,
-                        destino,
+                        fuente_recorte,
                         save_alpha=True,
                         white_background=False,
                         usar_compresion=False,
                     )
+
+                if exportado and poligonos_shapefile:
+                    base, extension = os.path.splitext(destino)
+                    if poligonos_shapefile > 1:
+                        for indice in range(poligonos_shapefile):
+                            pieza = f"{base}_poligono_{indice + 1:03d}{extension}"
+                            recortar_ortomosaico(fuente_recorte, CLIP_GEOJSON, salida=pieza, indice=indice)
+                            self._log(f"[5/5] Poligono {indice + 1}/{poligonos_shapefile}: {pieza}")
+                    recortar_ortomosaico(fuente_recorte, CLIP_GEOJSON, salida=destino)
+                    try:
+                        os.remove(fuente_recorte)
+                    except PermissionError:
+                        self._log(f"[5/5] Archivo temporal ocupado; se conserva: {fuente_recorte}")
+                    patron_pieza = re.compile(
+                        re.escape(os.path.basename(base)) + r"_poligono_(\d+)" + re.escape(extension) + r"$"
+                    )
+                    for nombre in os.listdir(os.path.dirname(destino)):
+                        coincidencia = patron_pieza.fullmatch(nombre)
+                        if coincidencia and int(coincidencia.group(1)) > (poligonos_shapefile if poligonos_shapefile > 1 else 0):
+                            os.remove(os.path.join(os.path.dirname(destino), nombre))
 
                 if exportado:
                     if etiqueta == "rgb" and not self._raster_tiene_datos_utiles(destino):
                         raise RuntimeError("El TIFF RGB exportado sigue sin datos utiles")
                     exportados.append(destino)
                     if usar_roi:
-                        self._log(f"[5/5] Ortomosaico {etiqueta.upper()} recortado por Metashape: {destino}")
+                        origen_recorte = "Metashape" if recorte_metashape else "shapefile"
+                        self._log(f"[5/5] Ortomosaico {etiqueta.upper()} recortado por {origen_recorte}: {destino}")
                     self._log(f"[5/5] Exportado: {destino}")
                 else:
                     self._log(f"[5/5] No se pudo exportar {etiqueta or 'chunk'}: sin exportador compatible")
@@ -714,55 +668,3 @@ class ProcesamientoMetashape:
             raise RuntimeError("No se pudo exportar ningun ortomosaico")
 
         self._guardar_documento(RUTA_PROYECTO)
-
-    def generar_curvas_nivel(self, intervalo_m=5, intervalo_maestra_m=25):
-        """Construye curvas delgadas; el backend clasifica las maestras."""
-        self._log(
-            f"[7/7] Generando curvas delgadas cada {intervalo_m:g} m "
-            f"y maestras cada {intervalo_maestra_m:g} m"
-        )
-        Metashape = self._ms()
-        elevation_data = self._enum("DataSource.ElevationData", "ElevationData")
-        geojson_format = self._enum("ShapesFormat.ShapesFormatGeoJSON", "ShapesFormatGeoJSON")
-        if elevation_data is None or geojson_format is None:
-            raise RuntimeError("La API de Metashape no admite curvas o exportacion GeoJSON")
-
-        os.makedirs(os.path.dirname(RUTA_CURVAS_NIVEL), exist_ok=True)
-        if os.path.exists(RUTA_CURVAS_NIVEL):
-            os.remove(RUTA_CURVAS_NIVEL)
-
-        # La superficie de referencia es el MDE generado en el paso anterior.
-        # Preferimos RGB porque es el chunk principal cuando hay datos mixtos.
-        chunks = list(self._obtener_chunks())
-        chunks.sort(key=lambda chunk: 0 if (getattr(chunk, "label", "") or "").strip().lower() == "rgb" else 1)
-        chunk = next((item for item in chunks if getattr(item, "elevation", None) is not None), None)
-        if chunk is None:
-            raise RuntimeError("No existe un MDE disponible para generar curvas")
-
-        self._log("[7/7] Usando MDE de suelo ya construido; generando curvas")
-
-        # En Metashape 2.2.x leer chunk.shapes puede lanzar OSError si el
-        # almacén todavía no existe; no devuelve None. Inicializamos la capa
-        # explícitamente para que Metashape cree shapes.zip al guardar.
-        chunk.shapes = Metashape.Shapes()
-        self._log("[7/7] Almacen de curvas inicializado")
-
-        chunk.buildContours(
-            source_data=elevation_data,
-            interval=float(intervalo_m),
-            prevent_intersections=True,
-        )
-        shapes = chunk.shapes
-        if not shapes.shapes:
-            raise RuntimeError("Metashape no genero geometria de curvas de nivel")
-
-        crs_wgs84 = Metashape.CoordinateSystem("EPSG::4326")
-        chunk.exportShapes(
-            path=RUTA_CURVAS_NIVEL,
-            save_polylines=True,
-            format=geojson_format,
-            crs=crs_wgs84,
-            save_labels=True,
-            save_attributes=True,
-        )
-        self._log(f"[7/7] Curvas exportadas: {RUTA_CURVAS_NIVEL}")

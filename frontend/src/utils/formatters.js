@@ -27,7 +27,6 @@ export function processingProgress(status) {
     construyendo_mde: 3,
     construyendo_ortomosaico: 4,
     exportando_resultado: 5,
-    generando_curvas: 6,
   }
   if (status?.step === 'finalizado' && !status?.running) return 100
   const step = steps[status?.step] ?? 0

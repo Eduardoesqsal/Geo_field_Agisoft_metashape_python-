@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unicodedata
 import zipfile
+from functools import lru_cache
 from datetime import datetime
 from io import BytesIO
 
@@ -15,18 +16,24 @@ import rasterio
 from fastapi import HTTPException
 from PIL import Image
 from rasterio.enums import Resampling
+from rasterio.features import bounds as geometry_bounds, geometry_mask
 from rasterio.windows import from_bounds as window_from_bounds
-from rasterio.warp import transform_bounds
+from rasterio.warp import transform_bounds, transform_geom
 
 import backend.runtime as runtime
 from backend.config import RUTA_ORTOMOSAICO_MS, RUTA_ORTOMOSAICO_RGB
+from backend.core.paths import CLIP_GEOJSON
 
 
 _RGB_PROFILE_CACHE = {}
 _RGB_PROFILE_CACHE_LOCK = threading.Lock()
 _RGB_PROFILE_COMPUTE_LOCK = threading.Lock()
 _RGB_PROFILE_CACHE_MAX_ITEMS = 16
-RGB_TILE_RENDER_VERSION = "rgb-original-rededge-autodetect-v4"
+RGB_TILE_RENDER_VERSION = "rgb-roi-mask-v5"
+
+
+def _clip_path():
+    return runtime.active_clip_path() if runtime.snapshot_ingesta_info().get("project_id") else CLIP_GEOJSON
 REDEDGE_COLOR_MATRIX = np.array(
     [
         [1.08, -0.04, -0.04],
@@ -44,9 +51,38 @@ def _cache_buster_tiles_rgb(ruta):
     if not ruta or not os.path.exists(ruta):
         return None
     try:
-        return f"{int(os.path.getmtime(ruta))}-{RGB_TILE_RENDER_VERSION}"
+        raster_version = os.stat(ruta).st_mtime_ns
+        clip_path = _clip_path()
+        recorte_version = os.stat(clip_path).st_mtime_ns if os.path.isfile(clip_path) else 0
+        project_id = runtime.snapshot_ingesta_info().get("project_id") or "legacy"
+        return f"{project_id}-{raster_version}-{recorte_version}-{RGB_TILE_RENDER_VERSION}"
     except OSError:
         return RGB_TILE_RENDER_VERSION
+
+
+@lru_cache(maxsize=16)
+def _geometrias_recorte_raster(ruta, version, crs):
+    with open(ruta, encoding="utf-8") as archivo:
+        contenido = json.load(archivo)
+    geometrias = []
+    for feature in contenido.get("features", []):
+        geometria = feature.get("geometry") or {}
+        if geometria.get("type") in {"Polygon", "MultiPolygon"}:
+            geometrias.append(transform_geom("EPSG:4326", crs, geometria))
+    return tuple(geometrias)
+
+
+def _mascara_recorte(src, bounds, out_shape):
+    clip_path = _clip_path()
+    if not os.path.isfile(clip_path):
+        return None
+    version = os.stat(clip_path).st_mtime_ns
+    crs = src.crs.to_string() if src.crs else "EPSG:4326"
+    geometrias = _geometrias_recorte_raster(clip_path, version, crs)
+    if not geometrias:
+        return None
+    transformacion = rasterio.transform.from_bounds(*bounds, out_shape[1], out_shape[0])
+    return geometry_mask(geometrias, out_shape=out_shape, transform=transformacion, invert=True)
 
 
 def _raster_tiene_datos_rgb(ruta, *, sample_size=256):
@@ -339,6 +375,14 @@ def _calcular_perfil_rgb(src, indices, rededge=False, limites=runtime.RGB_STRETC
 
 
 def _ruta_ortomosaico_rgb():
+    project_id = runtime.snapshot_ingesta_info().get("project_id")
+    if project_id:
+        name = project_id.removeprefix("legacy:")
+        ruta_rgb = os.path.join(runtime.active_project_dir(), f"{name}_rgb.tif")
+        ruta_ms = os.path.join(runtime.active_project_dir(), f"{name}_ms.tif")
+        if not os.path.isfile(ruta_rgb) and os.path.isfile(ruta_ms):
+            return ruta_ms
+        return ruta_rgb
     if os.path.exists(RUTA_ORTOMOSAICO_RGB):
         return RUTA_ORTOMOSAICO_RGB
 
@@ -392,6 +436,10 @@ def _ruta_ortomosaico_rgb():
 
 
 def _ruta_ortomosaico_ms():
+    project_id = runtime.snapshot_ingesta_info().get("project_id")
+    if project_id:
+        name = project_id.removeprefix("legacy:")
+        return os.path.join(runtime.active_project_dir(), f"{name}_ms.tif")
     if os.path.exists(RUTA_ORTOMOSAICO_MS):
         return RUTA_ORTOMOSAICO_MS
 
@@ -429,10 +477,24 @@ def _bounds_ortomosaico_rgb():
         with rasterio.open(ruta) as src:
             if not src.crs:
                 left, bottom, right, top = src.bounds
-                if -180.0 <= left <= 180.0 and -180.0 <= right <= 180.0 and -90.0 <= bottom <= 90.0 and -90.0 <= top <= 90.0:
-                    return [[bottom, left], [top, right]]
-                return None
-            left, bottom, right, top = transform_bounds(src.crs, "EPSG:4326", *src.bounds, densify_pts=21)
+                if not (-180.0 <= left <= 180.0 and -180.0 <= right <= 180.0
+                        and -90.0 <= bottom <= 90.0 and -90.0 <= top <= 90.0):
+                    return None
+            else:
+                left, bottom, right, top = transform_bounds(src.crs, "EPSG:4326", *src.bounds, densify_pts=21)
+            clip_path = _clip_path()
+            if os.path.isfile(clip_path):
+                geometrias = _geometrias_recorte_raster(
+                    clip_path, os.stat(clip_path).st_mtime_ns, "EPSG:4326"
+                )
+                if geometrias:
+                    cajas = [geometry_bounds(geometria) for geometria in geometrias]
+                    left = max(left, min(caja[0] for caja in cajas))
+                    bottom = max(bottom, min(caja[1] for caja in cajas))
+                    right = min(right, max(caja[2] for caja in cajas))
+                    top = min(top, max(caja[3] for caja in cajas))
+                    if left >= right or bottom >= top:
+                        return None
             return [[bottom, left], [top, right]]
     except Exception:
         return None
@@ -479,7 +541,7 @@ def _indice_banda_alpha(src):
 def _leer_alpha_explicito(src, indice, window=None, out_shape=None):
     kwargs = {
         "resampling": Resampling.nearest,
-        "masked": True,
+        "masked": False,
     }
     if out_shape is not None:
         kwargs["out_shape"] = out_shape
@@ -487,7 +549,7 @@ def _leer_alpha_explicito(src, indice, window=None, out_shape=None):
         kwargs.update(window=window, boundless=True, fill_value=0)
 
     banda = src.read(indice, **kwargs)
-    valores = np.asarray(np.ma.filled(banda, 0))
+    valores = np.asarray(banda)
     dtype = np.dtype(src.dtypes[indice - 1])
     if dtype == np.dtype("uint8"):
         return valores.astype(np.uint8, copy=False)
@@ -583,7 +645,7 @@ def _generar_png_overlay_rgb():
         raise HTTPException(status_code=404, detail="Ortomosaico RGB no disponible")
 
     try:
-        cache_buster_actual = int(os.path.getmtime(ruta))
+        cache_buster_actual = _cache_buster_tiles_rgb(ruta)
     except Exception:
         cache_buster_actual = None
 
@@ -634,6 +696,9 @@ def _generar_png_overlay_rgb():
             out_shape=(target_height, target_width),
             bandas=(r_raw, g_raw, b_raw),
         )
+        mascara_recorte = _mascara_recorte(src, src.bounds, (target_height, target_width))
+        if mascara_recorte is not None:
+            alpha = np.where(mascara_recorte, alpha, 0).astype(np.uint8)
         rgba = np.dstack((r, g, b, alpha))
 
         buf = BytesIO()
@@ -653,7 +718,7 @@ def _sincronizar_overlay_proyecto():
     if raster_valido:
         try:
             png = _generar_png_overlay_rgb()
-            cache_buster = int(os.path.getmtime(ruta))
+            cache_buster = _cache_buster_tiles_rgb(ruta)
         except Exception as exc:
             runtime.push_log(f"No se pudo preparar el overlay RGB: {exc}")
             png = None
@@ -831,6 +896,11 @@ def _leer_tile_ortomosaico(z, x, y):
                 out_shape=(runtime.TILE_SIZE, runtime.TILE_SIZE),
                 bandas=(r, g, b),
             )
+            mascara_recorte = _mascara_recorte(
+                src, (left, bottom, right, top), (runtime.TILE_SIZE, runtime.TILE_SIZE)
+            )
+            if mascara_recorte is not None:
+                alpha = np.where(mascara_recorte, alpha, 0).astype(np.uint8)
             rgba = np.dstack((r_norm, g_norm, b_norm, alpha))
 
             img = Image.fromarray(rgba, mode="RGBA")

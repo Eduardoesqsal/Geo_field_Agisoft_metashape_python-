@@ -20,6 +20,8 @@ datasets_crudos/
 # Environment files
 .env
 .env.*
+.venv/
+.venv314/
 
 # OS files
 .DS_Store

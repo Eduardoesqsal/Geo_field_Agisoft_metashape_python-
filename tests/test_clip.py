@@ -12,6 +12,59 @@ from backend.services.clip import recortar_ortomosaico
 
 
 class RecorteOrtomosaicoTest(unittest.TestCase):
+    def test_recorta_a_otro_archivo_si_el_original_sigue_abierto(self):
+        with tempfile.TemporaryDirectory() as carpeta:
+            raster = os.path.join(carpeta, "ortomosaico.tif")
+            salida = os.path.join(carpeta, "ortomosaico_recortado.tif")
+            limite = os.path.join(carpeta, "recorte.geojson")
+            with rasterio.open(
+                raster, "w", driver="GTiff", width=4, height=4, count=3,
+                dtype="uint8", crs="EPSG:4326", transform=from_origin(0, 4, 1, 1),
+            ) as destino:
+                destino.write(np.full((3, 4, 4), 100, dtype="uint8"))
+            with open(limite, "w", encoding="utf-8") as archivo:
+                json.dump({"features": [{"geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[1, 1], [3, 1], [3, 3], [1, 3], [1, 1]]],
+                }}]}, archivo)
+            with rasterio.open(raster) as origen_abierto:
+                self.assertTrue(recortar_ortomosaico(raster, limite, salida=salida))
+                self.assertEqual((origen_abierto.width, origen_abierto.height), (4, 4))
+            with rasterio.open(salida) as resultado:
+                self.assertEqual((resultado.width, resultado.height), (2, 2))
+
+    def test_dos_poligonos_generan_dos_tiff_independientes(self):
+        with tempfile.TemporaryDirectory() as carpeta:
+            raster = os.path.join(carpeta, "ortomosaico.tif")
+            limite = os.path.join(carpeta, "recorte.geojson")
+            with rasterio.open(
+                raster, "w", driver="GTiff", width=10, height=4, count=3,
+                dtype="uint8", crs="EPSG:4326", transform=from_origin(0, 4, 1, 1),
+            ) as destino:
+                destino.write(np.full((3, 4, 10), 100, dtype="uint8"))
+            poligonos = [
+                {"type": "Polygon", "coordinates": [[[0, 0], [2, 0], [2, 2], [0, 2], [0, 0]]]},
+                {"type": "Polygon", "coordinates": [[[8, 2], [10, 2], [10, 4], [8, 4], [8, 2]]]},
+            ]
+            with open(limite, "w", encoding="utf-8") as archivo:
+                json.dump({"features": [{"geometry": poligono} for poligono in poligonos]}, archivo)
+
+            salidas = [os.path.join(carpeta, f"parte_{indice}.tif") for indice in range(2)]
+            for indice, salida in enumerate(salidas):
+                self.assertTrue(recortar_ortomosaico(raster, limite, salida=salida, indice=indice))
+            self.assertTrue(recortar_ortomosaico(raster, limite))
+
+            with rasterio.open(salidas[0]) as primera, rasterio.open(salidas[1]) as segunda:
+                self.assertEqual((primera.width, primera.height), (2, 2))
+                self.assertEqual((segunda.width, segunda.height), (2, 2))
+                self.assertNotEqual(primera.bounds, segunda.bounds)
+                self.assertTrue(np.all(primera.dataset_mask() == 255))
+                self.assertTrue(np.all(segunda.dataset_mask() == 255))
+            with rasterio.open(raster) as conjunto:
+                self.assertEqual((conjunto.width, conjunto.height), (10, 4))
+                self.assertEqual(conjunto.dataset_mask()[0, 0], 0)
+                self.assertEqual(conjunto.dataset_mask()[0, 9], 255)
+
     def test_reintenta_reemplazo_si_windows_ocupa_el_tiff(self):
         with tempfile.TemporaryDirectory() as carpeta:
             raster = os.path.join(carpeta, "ortomosaico.tif")

@@ -10,7 +10,6 @@ from backend.core.frontend import serve_frontend_index
 from backend.core.naming import DEFAULT_CAMERA_MODEL, DEFAULT_PROJECT_NAME, normalizar_modelo_camara, sanitizar_nombre_proyecto
 from backend.core.paths import (
     BASE_DIR,
-    CONTOURS_SCRIPT,
     DATASET_DIR as RUTA_IMAGENES,
     EARTH_RADIUS,
     FRONTEND_DIST_DIR,
@@ -26,12 +25,14 @@ from backend.core.paths import (
     WEB_MERCATOR_CRS,
 )
 from backend.core.state import (
+    active_clip_path,
+    active_dataset_dir,
+    active_project_dir,
     DEFAULT_INGESTA_INFO,
     DEFAULT_STATE,
     EXTENSIONES_VALIDAS,
     app_title,
     camera_model_actual,
-    curvas_nivel_cache,
     es_rededge_m_actual,
     es_solo_rgb_actual,
     ingesta_info,
@@ -54,8 +55,10 @@ from backend.core.state import (
 )
 
 __all__ = [
+    "active_clip_path",
+    "active_dataset_dir",
+    "active_project_dir",
     "BASE_DIR",
-    "CONTOURS_SCRIPT",
     "DEFAULT_CAMERA_MODEL",
     "DEFAULT_INGESTA_INFO",
     "DEFAULT_PROJECT_NAME",
@@ -77,7 +80,6 @@ __all__ = [
     "_frontend_dist_path",
     "app_title",
     "camera_model_actual",
-    "curvas_nivel_cache",
     "es_rededge_m_actual",
     "es_solo_rgb_actual",
     "ingesta_info",

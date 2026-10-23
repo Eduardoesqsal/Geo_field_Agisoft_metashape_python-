@@ -4,7 +4,7 @@ import { API_BASE, apiJson } from './utils/api'
 import { DEFAULT_CENTER } from './utils/constants'
 import { formatAreaHa, formatDate, processingProgress, stateTone } from './utils/formatters'
 
-function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, vectorVisible, curvasNivel, contourLabelsVisible, drawingRoi, roiPoints, onRoiPoint }) {
+function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, vectorVisible, drawingRoi, roiPoints, onRoiPoint }) {
   const mapRef = useRef(null)
   const mapInstanceRef = useRef(null)
   const baseLayerRef = useRef(null)
@@ -12,12 +12,10 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
   const overlayLayerRef = useRef(null)
   const vectorLayerRef = useRef(null)
   const roiDraftLayerRef = useRef(null)
-  const curvasLayerRef = useRef(null)
   const hasUserInteractedRef = useRef(false)
   const pointsFocusTokenRef = useRef(null)
   const overlayFocusTokenRef = useRef(null)
   const vectorFocusTokenRef = useRef(null)
-  const [curvasGeojson, setCurvasGeojson] = useState(null)
   const [vectorGeojson, setVectorGeojson] = useState(null)
 
   const BingAerialLayer = useMemo(
@@ -96,12 +94,10 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
       overlayLayerRef.current = null
       vectorLayerRef.current = null
       roiDraftLayerRef.current = null
-      curvasLayerRef.current = null
       hasUserInteractedRef.current = false
       pointsFocusTokenRef.current = null
       overlayFocusTokenRef.current = null
       vectorFocusTokenRef.current = null
-      setCurvasGeojson(null)
     }
   }, [])
 
@@ -126,10 +122,6 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
         ? vectorOverlay.cache_buster || vectorOverlay.nombre || 'vector'
         : null,
     [vectorOverlay],
-  )
-  const curvasToken = useMemo(
-    () => (curvasNivel?.disponible ? curvasNivel.cache_buster || 'curvas-5m' : null),
-    [curvasNivel],
   )
 
   useEffect(() => {
@@ -200,7 +192,7 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
         radius: 6,
         color: '#ffffff',
         weight: 1,
-        fillColor: '#f97316',
+        fillColor: '#2563eb',
         fillOpacity: 0.95,
       })
         .addTo(pointsLayer)
@@ -245,26 +237,6 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
       cancelled = true
     }
   }, [vectorToken])
-
-  useEffect(() => {
-    if (!curvasToken) {
-      setCurvasGeojson(null)
-      return
-    }
-
-    let cancelled = false
-    apiJson('/overlay/contours.geojson')
-      .then((data) => {
-        if (!cancelled) setCurvasGeojson(data)
-      })
-      .catch(() => {
-        if (!cancelled) setCurvasGeojson(null)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [curvasToken])
 
   useEffect(() => {
     const map = mapInstanceRef.current
@@ -373,49 +345,6 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
     }
     vectorFocusTokenRef.current = vectorToken
   }, [vectorVisible, vectorOverlay, vectorToken, vectorGeojson])
-
-  useEffect(() => {
-    const map = mapInstanceRef.current
-    const geojson = curvasGeojson
-    if (!map) return
-
-    if (!curvasToken || !geojson || !curvasNivel?.bounds) {
-      if (curvasLayerRef.current) {
-        map.removeLayer(curvasLayerRef.current)
-        curvasLayerRef.current = null
-      }
-      return
-    }
-
-    const curvasLayerToken = `${curvasToken}-${contourLabelsVisible ? 'labels' : 'no-labels'}`
-    if (!curvasLayerRef.current || curvasLayerRef.current.__token !== curvasLayerToken) {
-      if (curvasLayerRef.current) map.removeLayer(curvasLayerRef.current)
-      const layer = L.geoJSON(geojson, {
-        style: (feature) => ({
-          color: feature?.properties?.es_maestra ? '#2563eb' : '#d946ef',
-          weight: feature?.properties?.es_maestra ? 5 : 2.5,
-          opacity: feature?.properties?.es_maestra ? 1 : 0.88,
-        }),
-        onEachFeature(feature, leafletLayer) {
-          const props = feature?.properties || {}
-          const elevation = props.elevacion_m ?? props.ELEVATION ?? props.Elevation ?? props.elevation ?? props.altitude ?? props.name
-          if (contourLabelsVisible && elevation !== undefined && elevation !== null) {
-            leafletLayer.bindTooltip(`${elevation} m`, {
-              sticky: true,
-              permanent: Boolean(props.es_maestra),
-              direction: 'center',
-              className: 'contour-label',
-            })
-          }
-        },
-      })
-      layer.__token = curvasLayerToken
-      curvasLayerRef.current = layer
-    }
-
-    if (!map.hasLayer(curvasLayerRef.current)) curvasLayerRef.current.addTo(map)
-    curvasLayerRef.current.bringToFront?.()
-  }, [curvasToken, curvasNivel, curvasGeojson, contourLabelsVisible])
 
   return <div ref={mapRef} className={`map-canvas${drawingRoi ? ' is-drawing-roi' : ''}`} />
 }
@@ -631,11 +560,8 @@ export default function App() {
   const [vectorVisible, setVectorVisible] = useState(true)
   const [drawingRoi, setDrawingRoi] = useState(false)
   const [roiPoints, setRoiPoints] = useState([])
-  const [contourLabelsVisible, setContourLabelsVisible] = useState(true)
   const [vectorOverlay, setVectorOverlay] = useState(null)
-  const [curvasNivel, setCurvasNivel] = useState(null)
-  const [intervaloCurvaDelgada, setIntervaloCurvaDelgada] = useState(5)
-  const [intervaloCurvaMaestra, setIntervaloCurvaMaestra] = useState(25)
+  const [catalog, setCatalog] = useState({ proyectos: [], datasets: [], project_id: null, dataset_id: 'legacy' })
   const [panelOpen, setPanelOpen] = useState(window.innerWidth > 760)
   const zipInputRef = useRef(null)
   const vectorInputRef = useRef(null)
@@ -669,34 +595,25 @@ export default function App() {
       { label: 'Orto RGB', value: overlay?.disponible ? 'Listo' : 'No disponible', icon: 'mapPinned' },
       { label: 'Orto MS', value: overlay?.disponible_ms ? 'Listo' : 'No disponible', icon: 'layers' },
       { label: 'Vector', value: vectorOverlay?.disponible ? 'Listo' : 'No disponible', icon: 'map' },
-      {
-        label: 'Curvas',
-        value: curvasNivel?.disponible
-          ? `${curvasNivel.intervalo_m} / ${curvasNivel.intervalo_maestra_m} m`
-          : 'No disponibles',
-        icon: 'chart',
-      },
     ],
-    [status, ingesta, overlay, vectorOverlay, curvasNivel, points.length],
+    [status, ingesta, overlay, vectorOverlay, points.length],
   )
 
   const refreshAll = async () => {
     setRefreshing(true)
     try {
-      const [statusData, logsData, ingestaData, overlayData, vectorData, curvasData] = await Promise.all([
+      const [statusData, logsData, ingestaData, overlayData, vectorData] = await Promise.all([
         apiJson('/status'),
         apiJson('/logs'),
         apiJson('/ingesta/estado'),
         apiJson('/overlay/status'),
         apiJson('/overlay/shapefile/status'),
-        apiJson('/overlay/contours/status'),
       ])
       setStatus(statusData)
       setLogs(logsData.logs || [])
       setIngesta(ingestaData)
       setOverlay(overlayData)
       setVectorOverlay(vectorData)
-      setCurvasNivel(curvasData)
       setProjectName((current) => current || ingestaData.nombre_proyecto || '')
       setCameraModel((current) => current || ingestaData.camera_model || 'mavic_3_rgb')
     } catch (error) {
@@ -706,11 +623,21 @@ export default function App() {
     }
   }
 
+  const refreshCatalog = async () => {
+    const data = await apiJson('/proyectos')
+    setCatalog(data)
+  }
+
   useEffect(() => {
     refreshAll()
+    refreshCatalog().catch(() => {})
     const timer = setInterval(refreshAll, 3500)
     return () => clearInterval(timer)
   }, [])
+
+  useEffect(() => {
+    if (!status?.running && status?.step === 'finalizado') refreshCatalog().catch(() => {})
+  }, [status?.running, status?.step])
 
   const showMessage = (kind, text) => {
     setNotice({ kind, text })
@@ -743,7 +670,7 @@ export default function App() {
       if (projectName.trim()) formData.append('nombre', projectName.trim())
       formData.append('camera_model', cameraModel)
       const data = await apiJson('/proyecto/nuevo', { method: 'POST', body: formData })
-      setProjectName('')
+      setProjectName(data.nombre_proyecto || '')
       setCameraModel(data.camera_model || 'mavic_3_rgb')
       setDriveUrl('')
       setShowDrive(false)
@@ -752,8 +679,41 @@ export default function App() {
       setRoiPoints([])
       showMessage('success', data.mensaje || 'Proyecto reiniciado')
       await refreshAll()
+      await refreshCatalog()
     } catch (error) {
       showMessage('error', error.message || 'No se pudo reiniciar el proyecto')
+    }
+  }
+
+  const selectProject = async (projectId) => {
+    if (!projectId) return
+    try {
+      const formData = new FormData()
+      formData.append('project_id', projectId)
+      const data = await apiJson('/proyectos/seleccionar', { method: 'POST', body: formData })
+      setProjectName(data.nombre_proyecto)
+      setCameraModel(data.camera_model)
+      setDrawingRoi(false)
+      setRoiPoints([])
+      await refreshAll()
+      await refreshCatalog()
+      showMessage('success', data.mensaje)
+    } catch (error) {
+      showMessage('error', error.message || 'No se pudo seleccionar el proyecto')
+    }
+  }
+
+  const selectDataset = async (datasetId) => {
+    if (!datasetId) return
+    try {
+      const formData = new FormData()
+      formData.append('dataset_id', datasetId)
+      const data = await apiJson('/datasets/seleccionar', { method: 'POST', body: formData })
+      await refreshAll()
+      await refreshCatalog()
+      showMessage('success', data.mensaje)
+    } catch (error) {
+      showMessage('error', error.message || 'No se pudo seleccionar el dataset')
     }
   }
 
@@ -795,6 +755,7 @@ export default function App() {
         showMessage('success', data.mensaje || 'ZIP cargado correctamente')
         setZipFileKey((value) => value + 1)
         await refreshAll()
+        await refreshCatalog()
       } catch (error) {
         showMessage('error', error.message || 'Error al subir ZIP')
       } finally {
@@ -831,6 +792,7 @@ export default function App() {
       setVectorVisible(true)
       showMessage('success', data.mensaje)
       await refreshAll()
+      await refreshCatalog()
     } catch (error) {
       showMessage('error', error.message || 'No se pudo guardar el ROI')
     }
@@ -841,6 +803,7 @@ export default function App() {
       const data = await apiJson('/overlay/vector/recorte', { method: 'DELETE' })
       showMessage('success', data.mensaje)
       await refreshAll()
+      await refreshCatalog()
     } catch (error) {
       showMessage('error', error.message || 'No se pudo quitar el recorte')
     }
@@ -914,6 +877,7 @@ export default function App() {
       setDriveUrl('')
       setShowDrive(false)
       await refreshAll()
+      await refreshCatalog()
     } catch (error) {
       showMessage('error', error.message || 'Error al descargar desde Drive')
     }
@@ -929,6 +893,7 @@ export default function App() {
       if (data.camera_model) setCameraModel(data.camera_model)
       showMessage('success', data.message || 'Proceso iniciado')
       await refreshAll()
+      await refreshCatalog()
     } catch (error) {
       showMessage('error', error.message || 'No se pudo iniciar el proceso')
     }
@@ -944,49 +909,6 @@ export default function App() {
     }
   }
 
-  const generateContours = async () => {
-    const intervalo_m = Number(intervaloCurvaDelgada)
-    const intervalo_maestra_m = Number(intervaloCurvaMaestra)
-    if (!Number.isFinite(intervalo_m) || !Number.isFinite(intervalo_maestra_m) || intervalo_m <= 0 || intervalo_maestra_m <= 0) {
-      showMessage('error', 'Los intervalos deben ser mayores que cero')
-      return
-    }
-    if (intervalo_maestra_m < intervalo_m || Math.abs(intervalo_maestra_m / intervalo_m - Math.round(intervalo_maestra_m / intervalo_m)) > 1e-6) {
-      showMessage('error', 'El intervalo maestro debe ser multiplo del intervalo delgado')
-      return
-    }
-    try {
-      const data = await apiJson('/overlay/contours/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ intervalo_m, intervalo_maestra_m }),
-      })
-      showMessage('success', data.message || 'Generacion de curvas iniciada')
-      await refreshAll()
-    } catch (error) {
-      showMessage('error', error.message || 'No se pudieron generar las curvas')
-    }
-  }
-
-  const deleteContours = async () => {
-    if (!window.confirm('¿Eliminar las curvas de nivel actuales? Podras generarlas nuevamente.')) return
-
-    try {
-      const data = await apiJson('/overlay/contours', { method: 'DELETE' })
-      setCurvasNivel((current) => ({
-        ...(current || {}),
-        disponible: false,
-        bounds: null,
-        cache_buster: null,
-        feature_count: null,
-      }))
-      showMessage('success', data.message || 'Curvas de nivel eliminadas')
-      await refreshAll()
-    } catch (error) {
-      showMessage('error', error.message || 'No se pudieron eliminar las curvas')
-    }
-  }
-
   return (
     <div className="app-shell">
       <div className="map-stage">
@@ -997,8 +919,6 @@ export default function App() {
           finalMode={finalMode}
           vectorOverlay={vectorOverlay}
           vectorVisible={vectorVisible}
-          curvasNivel={curvasNivel}
-          contourLabelsVisible={contourLabelsVisible}
           drawingRoi={drawingRoi}
           roiPoints={roiPoints}
           onRoiPoint={addRoiPoint}
@@ -1251,6 +1171,36 @@ export default function App() {
 
               <div className="toolbar-grid toolbar-grid-compact">
               <label className="field">
+                  <span className="field-label"><Icon name="folder" /> Proyectos guardados</span>
+                  <select
+                    value={catalog.project_id || ''}
+                    onChange={(event) => selectProject(event.target.value)}
+                    disabled={status?.running}
+                  >
+                    <option value="">Seleccionar proyecto</option>
+                    {catalog.proyectos.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.nombre}{item.procesado ? ' · procesado' : ' · pendiente'}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span className="field-label"><Icon name="database" /> Dataset de fotos</span>
+                  <select
+                    value={catalog.datasets.some((item) => item.id === catalog.dataset_id) ? catalog.dataset_id : ''}
+                    onChange={(event) => selectDataset(event.target.value)}
+                    disabled={status?.running}
+                  >
+                    <option value="">Seleccionar dataset</option>
+                    {catalog.datasets.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.nombre} · {item.imagenes_validas} fotos
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              <label className="field">
                   <span className="field-label">
                     <Icon name="folder" />
                     Nombre del proyecto
@@ -1273,54 +1223,12 @@ export default function App() {
                   </select>
               </label>
             </div>
-
-              <div className="toolbar-grid toolbar-grid-compact">
-                <label className="field">
-                  <span className="field-label">
-                    <Icon name="chart" />
-                    Curvas delgadas (m)
-                  </span>
-                  <input type="number" min="0.1" step="0.1" value={intervaloCurvaDelgada} onChange={(event) => setIntervaloCurvaDelgada(event.target.value)} />
-                </label>
-                <label className="field">
-                  <span className="field-label">
-                    <Icon name="chart" />
-                    Curvas maestras (m)
-                  </span>
-                  <input type="number" min="0.1" step="0.1" value={intervaloCurvaMaestra} onChange={(event) => setIntervaloCurvaMaestra(event.target.value)} />
-                </label>
-              </div>
+            <p className="project-help">Puedes reutilizar un dataset. Cada nueva ejecución de un proyecto procesado se guarda en otra carpeta.</p>
 
               <div className="action-row action-row-tight">
                 <button className="round-action is-primary" onClick={startProcess} disabled={status?.running || drawingRoi}>
                   <span className="round-action-icon"><Icon name="play" /></span>
                   <span>Procesar</span>
-                </button>
-                <button
-                  className="round-action is-accent"
-                  onClick={generateContours}
-                  disabled={status?.running}
-                  title="Genera curvas delgadas y maestras desde el proyecto Metashape existente"
-                >
-                  <span className="round-action-icon"><Icon name="chart" /></span>
-                  <span>Generar curvas</span>
-                </button>
-                <button
-                  className="round-action"
-                  onClick={() => setContourLabelsVisible((value) => !value)}
-                  disabled={!curvasNivel?.disponible}
-                >
-                  <span className="round-action-icon"><Icon name="mapPinned" /></span>
-                  <span>{contourLabelsVisible ? 'Ocultar cotas' : 'Mostrar cotas'}</span>
-                </button>
-                <button
-                  className="round-action is-danger"
-                  onClick={deleteContours}
-                  disabled={status?.running || !curvasNivel?.disponible}
-                  title="Elimina las curvas actuales para poder generarlas nuevamente"
-                >
-                  <span className="round-action-icon"><Icon name="trash" /></span>
-                  <span>Eliminar curvas</span>
                 </button>
                 <button className="round-action" onClick={refreshAll} disabled={refreshing}>
                   <span className="round-action-icon"><Icon name="refresh" /></span>
@@ -1330,15 +1238,15 @@ export default function App() {
                   <span className="round-action-icon"><Icon name="stop" /></span>
                   <span>Detener</span>
                 </button>
-                <button className="round-action is-accent" onClick={uploadZip}>
+                <button className="round-action is-accent" onClick={uploadZip} disabled={status?.running}>
                   <span className="round-action-icon"><Icon name="upload" /></span>
                   <span>Subir ZIP</span>
                 </button>
-                <button className="round-action is-accent" onClick={() => setShowDrive((value) => !value)}>
+                <button className="round-action is-accent" onClick={() => setShowDrive((value) => !value)} disabled={status?.running}>
                   <span className="round-action-icon"><Icon name="cloud" /></span>
                   <span>Enlace Drive</span>
                 </button>
-                <button className="round-action" onClick={saveProjectName}>
+                <button className="round-action" onClick={saveProjectName} disabled={status?.running}>
                   <span className="round-action-icon"><Icon name="save" /></span>
                   <span>Guardar nombre</span>
                 </button>

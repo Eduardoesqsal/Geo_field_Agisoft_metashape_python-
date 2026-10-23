@@ -5,7 +5,8 @@ from copy import deepcopy
 from datetime import datetime
 
 from backend.core.naming import DEFAULT_CAMERA_MODEL, DEFAULT_PROJECT_NAME, normalizar_modelo_camara, sanitizar_nombre_proyecto
-from backend.core.paths import BASE_DIR, CLIP_GEOJSON, CONTOURS_SCRIPT, FRONTEND_DIST_DIR, FRONTEND_INDEX_FILE, LOGS_DIR, MAIN_SCRIPT, METASHAPE_EXE, PROYECTO_DIR
+from backend.core.catalog import dataset_path, project_path
+from backend.core.paths import BASE_DIR, CLIP_GEOJSON, FRONTEND_DIST_DIR, FRONTEND_INDEX_FILE, LOGS_DIR, MAIN_SCRIPT, METASHAPE_EXE, PROYECTO_DIR
 
 
 app_title = "Procesamiento Metashape"
@@ -34,6 +35,8 @@ DEFAULT_INGESTA_INFO = {
     "puntos_gps": [],
     "centro_gps": None,
     "nombre_proyecto": DEFAULT_PROJECT_NAME,
+    "project_id": None,
+    "dataset_id": "legacy",
     "camera_model": DEFAULT_CAMERA_MODEL,
     "overlay_raster": None,
     "overlay_bounds": None,
@@ -42,7 +45,7 @@ DEFAULT_INGESTA_INFO = {
 state = deepcopy(DEFAULT_STATE)
 logs = []
 MAX_LOGS = 800
-lock = threading.Lock()
+lock = threading.RLock()
 process = None
 reader_thread = None
 ingesta_info = deepcopy(DEFAULT_INGESTA_INFO)
@@ -62,16 +65,6 @@ shapefile_overlay_cache = {
     "superficie_ha": None,
     "feature_count": None,
 }
-curvas_nivel_cache = {
-    "geojson": None,
-    "bounds": None,
-    "cache_buster": None,
-    "intervalo_m": 5,
-    "intervalo_maestra_m": 25,
-    "feature_count": None,
-}
-
-
 def push_log(line):
     line = line.rstrip()
     if not line:
@@ -114,6 +107,18 @@ def nombre_proyecto_actual():
     return sanitizar_nombre_proyecto(info.get("nombre_proyecto"))
 
 
+def active_project_dir():
+    return project_path(snapshot_ingesta_info().get("project_id"))
+
+
+def active_clip_path():
+    return os.path.join(active_project_dir(), "recorte_ortomosaico.geojson")
+
+
+def active_dataset_dir():
+    return dataset_path(snapshot_ingesta_info().get("dataset_id"))
+
+
 def camera_model_actual():
     info = snapshot_ingesta_info()
     return normalizar_modelo_camara(info.get("camera_model"))
@@ -152,15 +157,6 @@ def reset_runtime_state():
             "superficie_ha": None,
             "feature_count": None,
         })
-        curvas_nivel_cache.clear()
-        curvas_nivel_cache.update({
-            "geojson": None,
-            "bounds": None,
-            "cache_buster": None,
-            "intervalo_m": 5,
-            "intervalo_maestra_m": 25,
-            "feature_count": None,
-        })
         global process, reader_thread
         process = None
         reader_thread = None
@@ -184,7 +180,6 @@ def limpiar_salidas_proyecto():
             or nombre_lower.endswith(".aux.xml")
             or nombre_lower.endswith(".tif.xml")
             or nombre_lower.endswith(".tiff.xml")
-            or nombre_lower.endswith("_curvas_5m.geojson")
         ):
             continue
         try:
