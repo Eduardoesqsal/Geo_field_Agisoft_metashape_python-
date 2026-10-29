@@ -76,22 +76,26 @@ class MultiplesProyectosTest(unittest.TestCase):
         self.assertEqual([os.path.basename(path) for path in rgb], ["original.jpg"])
         self.assertTrue(os.path.isfile(os.path.join(catalog.dataset_path(new_dataset), "nueva.jpg")))
 
-    def test_nueva_ejecucion_guarda_otro_proyecto_y_conserva_recorte(self):
+    def test_nueva_ejecucion_reutiliza_carpeta_y_conserva_recorte(self):
         dataset_id = projects.prepare_dataset_upload("fotos.zip")
         _extraer_zip_a_dataset(self._zip_fotos("foto.jpg"))
         projects.select_dataset(dataset_id)
         original = projects.create_project("Vuelo", "mavic_3_rgb")
-        original_dir = catalog.project_path(original["project_id"])
+        self.assertIsNone(original["project_id"])
+        self.assertFalse(os.path.exists(catalog.project_path("Vuelo")))
+        first_id = projects.ensure_processing_project("Vuelo", "mavic_3_rgb")
+        original_dir = catalog.project_path(first_id)
         with open(os.path.join(original_dir, "Vuelo.psx"), "w", encoding="utf-8") as file:
             file.write("proyecto anterior")
         with open(os.path.join(original_dir, "recorte_ortomosaico.geojson"), "w", encoding="utf-8") as file:
             json.dump({"features": []}, file)
 
         next_id = projects.ensure_processing_project("Vuelo", "mavic_3_rgb")
-        self.assertEqual(next_id, "Vuelo_2")
+        self.assertEqual(next_id, "Vuelo")
         self.assertTrue(os.path.isfile(os.path.join(original_dir, "Vuelo.psx")))
-        self.assertTrue(os.path.isfile(os.path.join(catalog.project_path(next_id), "recorte_ortomosaico.geojson")))
+        self.assertTrue(os.path.isfile(os.path.join(original_dir, "recorte_ortomosaico.geojson")))
         self.assertEqual(catalog.read_project_manifest(next_id)["dataset_id"], dataset_id)
+        self.assertEqual([item["id"] for item in catalog.list_projects()], ["Vuelo"])
 
         projects.select_project("Vuelo")
         self.assertEqual(state.snapshot_ingesta_info()["project_id"], "Vuelo")
@@ -113,7 +117,7 @@ class MultiplesProyectosTest(unittest.TestCase):
         )
         self.assertEqual(result.stdout.strip().splitlines(), [os.path.join(project_dir, "Vuelo.psx"), dataset_dir])
 
-    def test_procesamientos_sucesivos_usan_carpetas_distintas(self):
+    def test_procesamientos_sucesivos_usan_la_misma_carpeta(self):
         dataset_id = projects.prepare_dataset_upload("fotos.zip")
         _extraer_zip_a_dataset(self._zip_fotos("foto.jpg"))
         projects.select_dataset(dataset_id)
@@ -144,9 +148,28 @@ class MultiplesProyectosTest(unittest.TestCase):
             processing.iniciar_proceso("Vuelo", "mavic_3_rgb")
             state.reader_thread.join(timeout=5)
 
-        self.assertNotEqual(environments[0]["METASHAPE_PROJECT_DIR"], environments[1]["METASHAPE_PROJECT_DIR"])
+        self.assertEqual(environments[0]["METASHAPE_PROJECT_DIR"], environments[1]["METASHAPE_PROJECT_DIR"])
         self.assertEqual(environments[0]["METASHAPE_DATASET_DIR"], catalog.dataset_path(dataset_id))
         self.assertEqual(environments[1]["METASHAPE_DATASET_DIR"], catalog.dataset_path(dataset_id))
+        self.assertEqual([item["id"] for item in catalog.list_projects()], ["Vuelo"])
+
+    def test_borrar_proyecto_conserva_dataset_y_limpia_seleccion(self):
+        dataset_id = projects.prepare_dataset_upload("vuelo.zip")
+        _extraer_zip_a_dataset(self._zip_fotos("foto.jpg"))
+        projects.select_dataset(dataset_id)
+        projects.create_project("Vuelo", "mavic_3_rgb")
+        projects.ensure_processing_project("Vuelo", "mavic_3_rgb")
+        project_dir = catalog.project_path("Vuelo")
+        with open(os.path.join(project_dir, "Vuelo.psx"), "w"):
+            pass
+
+        projects.delete_project("Vuelo")
+
+        self.assertFalse(os.path.exists(project_dir))
+        self.assertTrue(os.path.exists(catalog.dataset_path(dataset_id)))
+        self.assertIsNone(state.snapshot_ingesta_info()["project_id"])
+        self.assertEqual(state.snapshot_ingesta_info()["dataset_id"], dataset_id)
+        self.assertEqual(catalog.list_projects(), [])
 
 
 if __name__ == "__main__":

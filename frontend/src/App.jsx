@@ -4,7 +4,7 @@ import { API_BASE, apiJson } from './utils/api'
 import { DEFAULT_CENTER } from './utils/constants'
 import { formatAreaHa, formatDate, processingProgress, stateTone } from './utils/formatters'
 
-function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, vectorVisible, drawingRoi, roiPoints, onRoiPoint }) {
+function MapView({ points, datasetId, overlay, overlayVisible, finalMode, vectorOverlay, vectorVisible, drawingRoi, roiPoints, onRoiPoint }) {
   const mapRef = useRef(null)
   const mapInstanceRef = useRef(null)
   const baseLayerRef = useRef(null)
@@ -14,6 +14,7 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
   const roiDraftLayerRef = useRef(null)
   const hasUserInteractedRef = useRef(false)
   const pointsFocusTokenRef = useRef(null)
+  const focusedDatasetRef = useRef(null)
   const overlayFocusTokenRef = useRef(null)
   const vectorFocusTokenRef = useRef(null)
   const [vectorGeojson, setVectorGeojson] = useState(null)
@@ -96,6 +97,7 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
       roiDraftLayerRef.current = null
       hasUserInteractedRef.current = false
       pointsFocusTokenRef.current = null
+      focusedDatasetRef.current = null
       overlayFocusTokenRef.current = null
       vectorFocusTokenRef.current = null
     }
@@ -114,7 +116,7 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
     () => (overlay?.disponible && overlay?.bounds ? overlay.cache_buster || overlay.ruta || 'overlay' : null),
     [overlay],
   )
-  const overlayReady = Boolean(overlay?.disponible && overlay?.bounds)
+  const overlayReady = Boolean(finalMode && overlay?.disponible && overlay?.bounds)
 
   const vectorToken = useMemo(
     () =>
@@ -170,6 +172,11 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
     const pointsLayer = pointsLayerRef.current
     if (!map || !pointsLayer) return
 
+    if (focusedDatasetRef.current !== datasetId) {
+      focusedDatasetRef.current = datasetId
+      hasUserInteractedRef.current = false
+      pointsFocusTokenRef.current = null
+    }
     pointsLayer.clearLayers()
     const validPoints = (points || []).filter(
       (point) => Number.isFinite(point?.lat) && Number.isFinite(point?.lon),
@@ -186,6 +193,15 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
       return
     }
 
+    const routePoints = validPoints
+      .map((point) => [point.lat, point.lon])
+      .filter((latlng, index, all) => index === 0 || latlng[0] !== all[index - 1][0] || latlng[1] !== all[index - 1][1])
+    if (routePoints.length > 1) {
+      L.polyline(routePoints, { color: '#06b6d4', weight: 3, opacity: 0.9 })
+        .bindTooltip('Ruta de vuelo estimada por las fotos')
+        .addTo(pointsLayer)
+    }
+
     validPoints.forEach((point, index) => {
       const latlng = [point.lat, point.lon]
       L.circleMarker(latlng, {
@@ -200,7 +216,8 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
     })
 
     if (hasUserInteractedRef.current) return
-    if (pointsFocusTokenRef.current === pointsSignature) return
+    const focusToken = `${datasetId || 'legacy'}:${pointsSignature}`
+    if (pointsFocusTokenRef.current === focusToken) return
 
     if (validPoints.length === 1) {
       map.setView([validPoints[0].lat, validPoints[0].lon], 17)
@@ -210,8 +227,8 @@ function MapView({ points, overlay, overlayVisible, finalMode, vectorOverlay, ve
         { padding: [36, 36] },
       )
     }
-    pointsFocusTokenRef.current = pointsSignature
-  }, [pointsSignature, overlayReady])
+    pointsFocusTokenRef.current = focusToken
+  }, [datasetId, pointsSignature, overlayReady])
 
   useEffect(() => {
     if (!vectorToken) {
@@ -703,6 +720,21 @@ export default function App() {
     }
   }
 
+  const deleteProject = async () => {
+    const projectId = catalog.project_id
+    if (!projectId || projectId.startsWith('legacy:')) return
+    if (!window.confirm(`¿Borrar el proyecto "${projectId}" y todos los archivos de su carpeta? El dataset de fotos se conservará.`)) return
+    try {
+      const data = await apiJson(`/proyectos/${encodeURIComponent(projectId)}`, { method: 'DELETE' })
+      setProjectName('')
+      await refreshAll()
+      await refreshCatalog()
+      showMessage('success', data.mensaje || 'Proyecto borrado')
+    } catch (error) {
+      showMessage('error', error.message || 'No se pudo borrar el proyecto')
+    }
+  }
+
   const selectDataset = async (datasetId) => {
     if (!datasetId) return
     try {
@@ -914,6 +946,7 @@ export default function App() {
       <div className="map-stage">
         <MapView
           points={points}
+          datasetId={ingesta?.dataset_id}
           overlay={overlay}
           overlayVisible={overlayVisible}
           finalMode={finalMode}
@@ -1116,7 +1149,9 @@ export default function App() {
               </div>
               <p className="vector-clip-note">
                 {vectorOverlay?.recorte_activo
-                  ? 'Al procesar, el ROI recortará los ortomosaicos RGB y multiespectral. Fuera del polígono quedará transparente.'
+                  ? cameraModel === 'rededge_m'
+                    ? 'El TIFF MicaSense conservará todo el vuelo y sus cinco bandas originales; el ROI solo limitará la vista en el mapa.'
+                    : 'Al procesar, el ROI recortará los ortomosaicos RGB y multiespectral. Fuera del polígono quedará transparente.'
                   : drawingRoi
                     ? 'Haz clic en el mapa para marcar al menos tres vertices y luego pulsa Guardar ROI.'
                     : 'Importa un KML o dibuja un ROI en el mapa. Sin recorte se exportan los ortomosaicos completos.'}
@@ -1180,7 +1215,7 @@ export default function App() {
                     <option value="">Seleccionar proyecto</option>
                     {catalog.proyectos.map((item) => (
                       <option key={item.id} value={item.id}>
-                        {item.nombre}{item.procesado ? ' · procesado' : ' · pendiente'}
+                        {item.nombre}
                       </option>
                     ))}
                   </select>
@@ -1223,7 +1258,7 @@ export default function App() {
                   </select>
               </label>
             </div>
-            <p className="project-help">Puedes reutilizar un dataset. Cada nueva ejecución de un proyecto procesado se guarda en otra carpeta.</p>
+            <p className="project-help">La carpeta del proyecto se crea al procesar. Si vuelves a procesarlo, se actualiza en la misma carpeta. Los datasets de fotos se conservan por separado.</p>
 
               <div className="action-row action-row-tight">
                 <button className="round-action is-primary" onClick={startProcess} disabled={status?.running || drawingRoi}>
@@ -1253,6 +1288,10 @@ export default function App() {
                 <button className="round-action" onClick={newProject} disabled={status?.running}>
                   <span className="round-action-icon"><Icon name="folder" /></span>
                   <span>Nuevo proyecto</span>
+                </button>
+                <button className="round-action is-danger" onClick={deleteProject} disabled={status?.running || !catalog.project_id || catalog.project_id.startsWith('legacy:')}>
+                  <span className="round-action-icon"><Icon name="trash" /></span>
+                  <span>Borrar proyecto</span>
                 </button>
               </div>
 

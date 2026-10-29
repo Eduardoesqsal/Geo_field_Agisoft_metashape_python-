@@ -28,7 +28,7 @@ from backend.services.overlay import (
 from backend.services.vector_overlay import cargar_y_sincronizar_desde_upload, guardar_roi_dibujado, recuperar_recorte_guardado
 from backend.services.process import detener_proceso, iniciar_proceso
 from backend.services.projects import (
-    catalog_status, create_project, prepare_dataset_upload, select_dataset, select_project,
+    catalog_status, create_project, delete_project, prepare_dataset_upload, select_dataset, select_project,
 )
 from backend.core.paths import CLIP_GEOJSON
 
@@ -242,6 +242,11 @@ def proyectos():
 @router.post("/proyectos/seleccionar")
 def seleccionar_proyecto(project_id: str = Form(...)):
     return select_project(project_id)
+
+
+@router.delete("/proyectos/{project_id}")
+def borrar_proyecto(project_id: str):
+    return delete_project(project_id)
 
 
 @router.post("/datasets/seleccionar")

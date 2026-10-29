@@ -1,4 +1,4 @@
-"""Seleccion y creacion de proyectos y datasets sin borrar trabajos previos."""
+"""Seleccion y gestion de proyectos y datasets locales."""
 
 import os
 import shutil
@@ -35,17 +35,20 @@ def create_project(nombre=None, camera_model=None):
     _assert_idle()
     info = state.snapshot_ingesta_info()
     dataset_id = info.get("dataset_id") or "legacy"
-    name = unique_id(PROYECTO_DIR, nombre or "proyecto")
+    name = sanitizar_nombre_proyecto(nombre or "proyecto")
+    if os.path.exists(os.path.join(PROYECTO_DIR, name)) or any(
+        item["id"] == f"legacy:{name}" for item in list_projects()
+    ):
+        raise HTTPException(status_code=409, detail="Ya existe un proyecto con ese nombre")
     model = normalizar_modelo_camara(camera_model or info.get("camera_model"))
-    save_project_manifest(name, dataset_id, model)
     state.reset_runtime_state()
     state.update_ingesta_info(
-        project_id=name, dataset_id=dataset_id, nombre_proyecto=name,
+        project_id=None, dataset_id=dataset_id, nombre_proyecto=name,
         camera_model=model, origen="dataset existente" if image_count(dataset_path(dataset_id), recursive=dataset_id != "legacy") else None,
     )
     _actualizar_puntos_gps_desde_dataset()
-    state.update_state(message=f"Proyecto {name} listo")
-    return {"ok": True, "mensaje": f"Proyecto {name} creado", "project_id": name,
+    state.update_state(message=f"Proyecto {name} listo para procesar")
+    return {"ok": True, "mensaje": f"Proyecto {name} listo para procesar", "project_id": None,
             "nombre_proyecto": name, "camera_model": model}
 
 
@@ -81,6 +84,7 @@ def select_dataset(dataset_id):
         dataset_id=dataset_id, origen="dataset existente", imagenes_validas=item["imagenes_validas"],
         total_archivos=item["imagenes_validas"],
     )
+    state.update_state(step="ingestado", message=f"Dataset {dataset_id} listo")
     _actualizar_puntos_gps_desde_dataset()
     info = state.snapshot_ingesta_info()
     project_id = info.get("project_id")
@@ -100,17 +104,17 @@ def prepare_dataset_upload(nombre):
 
 
 def ensure_processing_project(nombre, camera_model):
-    """Cada nueva ejecucion recibe una carpeta si el proyecto ya tiene resultados."""
+    """Crea la carpeta al procesar y reutiliza la del proyecto seleccionado."""
     info = state.snapshot_ingesta_info()
     requested = sanitizar_nombre_proyecto(nombre or info.get("nombre_proyecto"))
     project_id = info.get("project_id")
-    project_dir = project_path(project_id)
-    existing = project_id and not project_id.startswith("legacy:") and os.path.isfile(
-        os.path.join(project_dir, f"{project_id}.psx")
-    )
-    if not project_id or project_id.startswith("legacy:") or requested != project_id or existing:
+    if project_id != requested or (project_id or "").startswith("legacy:"):
+        if os.path.exists(os.path.join(PROYECTO_DIR, requested)) or any(
+            item["id"] == f"legacy:{requested}" for item in list_projects()
+        ):
+            raise HTTPException(status_code=409, detail="Ya existe un proyecto con ese nombre; seleccionalo o usa otro nombre")
         previous_clip = state.active_clip_path()
-        project_id = unique_id(PROYECTO_DIR, requested)
+        project_id = requested
         save_project_manifest(project_id, info.get("dataset_id") or "legacy", camera_model)
         if os.path.isfile(previous_clip):
             shutil.copy2(previous_clip, os.path.join(project_path(project_id), "recorte_ortomosaico.geojson"))
@@ -118,3 +122,32 @@ def ensure_processing_project(nombre, camera_model):
         save_project_manifest(project_id, info.get("dataset_id") or "legacy", camera_model)
     state.update_ingesta_info(project_id=project_id, nombre_proyecto=project_id, camera_model=camera_model)
     return project_id
+
+
+def delete_project(project_id):
+    _assert_idle()
+    item = next((item for item in list_projects() if item["id"] == project_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+    if project_id.startswith("legacy:"):
+        raise HTTPException(status_code=400, detail="Los proyectos antiguos de la raiz no tienen una carpeta independiente")
+
+    root = os.path.realpath(PROYECTO_DIR)
+    candidate = os.path.join(PROYECTO_DIR, project_id)
+    target = os.path.realpath(candidate)
+    if (os.path.normcase(os.path.dirname(target)) != os.path.normcase(root)
+            or os.path.islink(candidate)
+            or (hasattr(os.path, "isjunction") and os.path.isjunction(candidate))
+            or not os.path.isfile(os.path.join(candidate, "proyecto.json"))):
+        raise HTTPException(status_code=400, detail="Ruta de proyecto no valida")
+
+    shutil.rmtree(candidate)
+    if state.snapshot_ingesta_info().get("project_id") == project_id:
+        info = state.snapshot_ingesta_info()
+        dataset_id = info.get("dataset_id") or "legacy"
+        camera_model = info.get("camera_model")
+        state.reset_runtime_state()
+        state.update_ingesta_info(dataset_id=dataset_id, camera_model=camera_model)
+        _actualizar_puntos_gps_desde_dataset()
+        state.update_state(message=f"Proyecto {project_id} borrado")
+    return {"ok": True, "mensaje": f"Proyecto {project_id} borrado"}
