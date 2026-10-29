@@ -1150,7 +1150,7 @@ export default function App() {
               <p className="vector-clip-note">
                 {vectorOverlay?.recorte_activo
                   ? cameraModel === 'rededge_m'
-                    ? 'El TIFF MicaSense conservará todo el vuelo y sus cinco bandas originales; el ROI solo limitará la vista en el mapa.'
+                    ? 'Al procesar, el ROI recortará el TIFF MicaSense y conservará sus cinco bandas originales más Alpha.'
                     : 'Al procesar, el ROI recortará los ortomosaicos RGB y multiespectral. Fuera del polígono quedará transparente.'
                   : drawingRoi
                     ? 'Haz clic en el mapa para marcar al menos tres vertices y luego pulsa Guardar ROI.'

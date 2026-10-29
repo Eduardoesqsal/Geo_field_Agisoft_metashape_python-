@@ -535,7 +535,7 @@ class ProcesamientoMetashape:
         recorte_metashape = usar_roi and not poligonos_shapefile
         limite_exterior = None
         formato_geojson = None
-        if recorte_metashape:
+        if recorte_metashape and self.camera_model != "rededge_m":
             limite_exterior = self._enum("Shape.BoundaryType.OuterBoundary", "Shape.OuterBoundary")
             formato_geojson = self._enum("ShapesFormat.ShapesFormatGeoJSON", "ShapesFormatGeoJSON")
             if limite_exterior is None or formato_geojson is None:
@@ -597,6 +597,7 @@ class ProcesamientoMetashape:
 
             etiqueta = (getattr(chunk, "label", "") or "").strip().lower()
             es_rededge = self.camera_model == "rededge_m" and etiqueta == "ms"
+            recorte_rededge = es_rededge and usar_roi
             destino = destinos.get(etiqueta)
             if destino is None:
                 destino = os.path.join(
@@ -616,7 +617,7 @@ class ProcesamientoMetashape:
                 opciones_ms, epsg_ms = self._opciones_exportacion_ms(chunk) if etiqueta == "ms" else ({}, None)
                 fuente_recorte = (
                     f"{destino}.{uuid.uuid4().hex}.sin_recorte.tif"
-                    if poligonos_shapefile and not es_rededge else destino
+                    if (poligonos_shapefile and not es_rededge) or recorte_rededge else destino
                 )
                 fuente_ms = (
                     f"{fuente_recorte}.metashape_raw.tif"
@@ -651,7 +652,7 @@ class ProcesamientoMetashape:
                         usar_compresion=False,
                     )
 
-                if exportado and poligonos_shapefile and not es_rededge:
+                if exportado and ((poligonos_shapefile and not es_rededge) or recorte_rededge):
                     base, extension = os.path.splitext(destino)
                     if poligonos_shapefile > 1:
                         for indice in range(poligonos_shapefile):
@@ -675,10 +676,8 @@ class ProcesamientoMetashape:
                     if etiqueta == "rgb" and not self._raster_tiene_datos_utiles(destino):
                         raise RuntimeError("El TIFF RGB exportado sigue sin datos utiles")
                     exportados.append(destino)
-                    if es_rededge and usar_roi:
-                        self._log("[5/5] MicaSense: GeoTIFF completo del vuelo; el ROI solo limita la vista del mapa")
-                    elif usar_roi:
-                        origen_recorte = "Metashape" if recorte_metashape else "shapefile"
+                    if usar_roi:
+                        origen_recorte = "shapefile" if poligonos_shapefile else "ROI" if es_rededge else "Metashape"
                         self._log(f"[5/5] Ortomosaico {etiqueta.upper()} recortado por {origen_recorte}: {destino}")
                     self._log(f"[5/5] Exportado: {destino}")
                 else:

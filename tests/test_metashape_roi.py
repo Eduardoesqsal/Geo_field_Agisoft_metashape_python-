@@ -465,7 +465,7 @@ class ExportacionRoiNativoTest(unittest.TestCase):
         self.assertEqual(exportaciones[0]["resolution"], 0.2)
         self.assertTrue(exportaciones[0]["save_alpha"])
 
-    def test_rededge_exporta_todas_las_bandas_sin_recortar_el_tiff(self):
+    def test_rededge_recorta_el_tiff_sin_perder_bandas(self):
         for formato in ("roi", "shp"):
             with self.subTest(formato=formato), tempfile.TemporaryDirectory() as carpeta:
                 exportaciones = []
@@ -478,24 +478,53 @@ class ExportacionRoiNativoTest(unittest.TestCase):
                 app = ProcesamientoMetashape(camera_model="rededge_m")
                 app._metashape = SimpleNamespace(
                     DataSource=SimpleNamespace(OrthomosaicData="ortomosaico"),
-                    Shape=SimpleNamespace(BoundaryType=SimpleNamespace(OuterBoundary="exterior")),
-                    ShapesFormat=SimpleNamespace(ShapesFormatGeoJSON="geojson"),
                 )
                 app._obtener_chunks = lambda: [chunk]
                 app._guardar_documento = lambda *_: None
                 app._opciones_exportacion_ms = lambda _: ({"raster_transform": "valores"}, 32613)
                 verificaciones = []
-                app._verificar_exportacion_ms = lambda *args, **kwargs: verificaciones.append((args, kwargs))
+
+                def verificar(*args, **kwargs):
+                    verificaciones.append((args, kwargs))
+                    with rasterio.open(
+                        kwargs["destino"], "w", driver="GTiff", width=10, height=4,
+                        count=6, dtype="float32", crs="EPSG:4326",
+                        transform=from_origin(0, 4, 1, 1), nodata=-10000,
+                    ) as raster:
+                        datos = np.zeros((6, 4, 10), dtype="float32")
+                        for banda in range(5):
+                            datos[banda] = (banda + 1) / 10
+                        datos[5] = 255
+                        raster.write(datos)
+                        raster.colorinterp = (
+                            rasterio.enums.ColorInterp.blue,
+                            rasterio.enums.ColorInterp.green,
+                            rasterio.enums.ColorInterp.red,
+                            rasterio.enums.ColorInterp.undefined,
+                            rasterio.enums.ColorInterp.undefined,
+                            rasterio.enums.ColorInterp.alpha,
+                        )
+                        raster.update_tags(BandOrder="Blue,Green,Red,RedEdge,NIR,Alpha")
+                        for indice, nombre in enumerate(("Blue", "Green", "Red", "Red edge", "NIR", "Alpha"), 1):
+                            raster.set_band_description(indice, nombre)
+
+                app._verificar_exportacion_ms = verificar
                 roi = os.path.join(carpeta, "recorte.geojson")
                 salida = os.path.join(carpeta, "micasense_ms.tif")
+                geometrias = [
+                    {"type": "Polygon", "coordinates": [[
+                        [1, 0], [3, 0], [3, 3], [1, 3], [1, 0],
+                    ]]},
+                ]
+                if formato == "shp":
+                    geometrias.append({"type": "Polygon", "coordinates": [[
+                        [7, 1], [9, 1], [9, 4], [7, 4], [7, 1],
+                    ]]})
                 with open(roi, "w", encoding="utf-8") as archivo:
                     json.dump({
                         "type": "FeatureCollection",
-                        "features": [{"type": "Feature", "geometry": {
-                            "type": "Polygon", "coordinates": [[
-                                [0, 0], [1, 0], [1, 1], [0, 0],
-                            ]],
-                        }}],
+                        "features": [{"type": "Feature", "geometry": geometria}
+                                     for geometria in geometrias],
                         "_recorte": {"formato": formato},
                     }, archivo)
                 with patch("backend.workflow.CLIP_GEOJSON", roi), \
@@ -504,13 +533,30 @@ class ExportacionRoiNativoTest(unittest.TestCase):
                     app.exportar_resultado()
 
                 self.assertEqual(len(exportaciones), 1)
-                self.assertEqual(exportaciones[0]["path"], salida + ".metashape_raw.tif")
+                self.assertTrue(exportaciones[0]["path"].endswith(".sin_recorte.tif.metashape_raw.tif"))
                 self.assertFalse(exportaciones[0]["clip_to_boundary"])
                 self.assertTrue(exportaciones[0]["save_alpha"])
                 self.assertEqual(exportaciones[0]["raster_transform"], "valores")
-                self.assertEqual(verificaciones[0][0], (salida + ".metashape_raw.tif", 32613))
-                self.assertEqual(verificaciones[0][1]["destino"], salida)
+                self.assertEqual(verificaciones[0][0], (exportaciones[0]["path"], 32613))
+                self.assertNotEqual(verificaciones[0][1]["destino"], salida)
                 self.assertEqual(importaciones, [])
+                self.assertFalse(os.path.exists(verificaciones[0][1]["destino"]))
+                with rasterio.open(salida) as raster:
+                    self.assertEqual(raster.count, 6)
+                    self.assertEqual(raster.descriptions, ("Blue", "Green", "Red", "Red edge", "NIR", "Alpha"))
+                    self.assertEqual(raster.tags()["BandOrder"], "Blue,Green,Red,RedEdge,NIR,Alpha")
+                    self.assertEqual(raster.read(5)[1, 1], 0.5)
+                    self.assertEqual(raster.read(6)[1, 1], 255)
+                    if formato == "roi":
+                        self.assertEqual((raster.width, raster.height), (2, 3))
+                    else:
+                        self.assertEqual(raster.dataset_mask()[0, 0], 0)
+                if formato == "shp":
+                    for indice in (1, 2):
+                        pieza = os.path.join(carpeta, f"micasense_ms_poligono_{indice:03d}.tif")
+                        with rasterio.open(pieza) as raster:
+                            self.assertEqual(raster.count, 6)
+                            self.assertEqual((raster.width, raster.height), (2, 3))
 
 
 if __name__ == "__main__":
