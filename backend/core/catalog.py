@@ -105,10 +105,15 @@ def list_projects():
             if not os.path.isfile(manifest_path):
                 continue
             manifest = read_project_manifest(name)
+            ortomosaico_listo = any(
+                os.path.isfile(os.path.join(path, f"{name}_{tipo}.tif"))
+                for tipo in ("rgb", "ms")
+            )
             projects.append({
                 **manifest,
                 "nombre": name,
                 "procesado": os.path.isfile(os.path.join(path, f"{name}.psx")),
+                "ortomosaico_listo": ortomosaico_listo,
                 "ruta": path,
             })
         elif name.lower().endswith(".psx"):
@@ -116,6 +121,11 @@ def list_projects():
             projects.append({
                 "id": f"legacy:{stem}", "nombre": stem,
                 "dataset_id": "legacy", "camera_model": "mavic_3_rgb",
-                "procesado": True, "ruta": PROYECTO_DIR,
+                "procesado": True,
+                "ortomosaico_listo": any(
+                    os.path.isfile(os.path.join(PROYECTO_DIR, f"{stem}_{tipo}.tif"))
+                    for tipo in ("rgb", "ms")
+                ),
+                "ruta": PROYECTO_DIR,
             })
     return projects

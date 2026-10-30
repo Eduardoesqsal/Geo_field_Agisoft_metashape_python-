@@ -41,14 +41,15 @@ def create_project(nombre=None, camera_model=None):
     ):
         raise HTTPException(status_code=409, detail="Ya existe un proyecto con ese nombre")
     model = normalizar_modelo_camara(camera_model or info.get("camera_model"))
+    save_project_manifest(name, dataset_id, model)
     state.reset_runtime_state()
     state.update_ingesta_info(
-        project_id=None, dataset_id=dataset_id, nombre_proyecto=name,
+        project_id=name, dataset_id=dataset_id, nombre_proyecto=name,
         camera_model=model, origen="dataset existente" if image_count(dataset_path(dataset_id), recursive=dataset_id != "legacy") else None,
     )
     _actualizar_puntos_gps_desde_dataset()
     state.update_state(message=f"Proyecto {name} listo para procesar")
-    return {"ok": True, "mensaje": f"Proyecto {name} listo para procesar", "project_id": None,
+    return {"ok": True, "mensaje": f"Proyecto {name} listo para procesar", "project_id": name,
             "nombre_proyecto": name, "camera_model": model}
 
 
@@ -73,6 +74,26 @@ def select_project(project_id):
         state.update_state(message=f"Proyecto {name} listo")
     return {"ok": True, "mensaje": f"Proyecto {name} seleccionado", "project_id": project_id,
             "nombre_proyecto": name, "camera_model": state.camera_model_actual()}
+
+
+def finish_project():
+    _assert_idle()
+    info = state.snapshot_ingesta_info()
+    project_id = info.get("project_id")
+    if not project_id or state.snapshot_state().get("step") != "finalizado":
+        raise HTTPException(status_code=409, detail="No hay un proyecto terminado para guardar")
+    if not os.path.isfile(os.path.join(project_path(project_id), f"{project_id}.psx")):
+        raise HTTPException(status_code=409, detail="No se encontro el archivo de Metashape del proyecto")
+    state.reset_runtime_state()
+    state.update_state(message=f"Proyecto {project_id} guardado. Listo para el siguiente trabajo")
+    return {"ok": True, "mensaje": f"Proyecto {project_id} guardado. Listo para el siguiente trabajo"}
+
+
+def close_project():
+    _assert_idle()
+    state.reset_runtime_state()
+    state.update_state(message="Mapa base listo para el siguiente proyecto")
+    return {"ok": True, "mensaje": "Mapa base listo para el siguiente proyecto"}
 
 
 def select_dataset(dataset_id):
@@ -104,7 +125,7 @@ def prepare_dataset_upload(nombre):
 
 
 def ensure_processing_project(nombre, camera_model):
-    """Crea la carpeta al procesar y reutiliza la del proyecto seleccionado."""
+    """Reutiliza la carpeta del proyecto y admite sesiones antiguas sin carpeta."""
     info = state.snapshot_ingesta_info()
     requested = sanitizar_nombre_proyecto(nombre or info.get("nombre_proyecto"))
     project_id = info.get("project_id")
@@ -116,15 +137,16 @@ def ensure_processing_project(nombre, camera_model):
         previous_clip = state.active_clip_path()
         project_id = requested
         save_project_manifest(project_id, info.get("dataset_id") or "legacy", camera_model)
-        if os.path.isfile(previous_clip):
-            shutil.copy2(previous_clip, os.path.join(project_path(project_id), "recorte_ortomosaico.geojson"))
+        clip_destino = os.path.join(project_path(project_id), "recorte_ortomosaico.geojson")
+        if os.path.isfile(previous_clip) and os.path.normcase(previous_clip) != os.path.normcase(clip_destino):
+            shutil.move(previous_clip, clip_destino)
     else:
         save_project_manifest(project_id, info.get("dataset_id") or "legacy", camera_model)
     state.update_ingesta_info(project_id=project_id, nombre_proyecto=project_id, camera_model=camera_model)
     return project_id
 
 
-def delete_project(project_id):
+def delete_project(project_id, delete_dataset=False):
     _assert_idle()
     item = next((item for item in list_projects() if item["id"] == project_id), None)
     if item is None:
@@ -141,13 +163,34 @@ def delete_project(project_id):
             or not os.path.isfile(os.path.join(candidate, "proyecto.json"))):
         raise HTTPException(status_code=400, detail="Ruta de proyecto no valida")
 
+    dataset_id = read_project_manifest(project_id).get("dataset_id") or "legacy"
+    dataset_target = None
+    if delete_dataset:
+        if dataset_id == "legacy":
+            raise HTTPException(status_code=400, detail="El dataset original es compartido y no se puede borrar con un proyecto")
+        if any(other["id"] != project_id and other.get("dataset_id") == dataset_id
+               for other in list_projects()):
+            raise HTTPException(status_code=409, detail="Otro proyecto usa este dataset; primero elimina los otros proyectos")
+        dataset_root = os.path.realpath(DATASET_DIR)
+        dataset_candidate = os.path.join(DATASET_DIR, dataset_id)
+        dataset_target = os.path.realpath(dataset_candidate)
+        if (dataset_id != sanitizar_nombre_proyecto(dataset_id)
+                or os.path.normcase(os.path.dirname(dataset_target)) != os.path.normcase(dataset_root)
+                or os.path.islink(dataset_candidate)
+                or (hasattr(os.path, "isjunction") and os.path.isjunction(dataset_candidate))
+                or not os.path.isdir(dataset_candidate)):
+            raise HTTPException(status_code=400, detail="Ruta de dataset no valida")
+
+    info = state.snapshot_ingesta_info()
     shutil.rmtree(candidate)
-    if state.snapshot_ingesta_info().get("project_id") == project_id:
-        info = state.snapshot_ingesta_info()
-        dataset_id = info.get("dataset_id") or "legacy"
+    if dataset_target is not None:
+        shutil.rmtree(dataset_target)
+    if info.get("project_id") == project_id or (delete_dataset and info.get("dataset_id") == dataset_id):
         camera_model = info.get("camera_model")
         state.reset_runtime_state()
-        state.update_ingesta_info(dataset_id=dataset_id, camera_model=camera_model)
+        state.update_ingesta_info(dataset_id="legacy" if delete_dataset else info.get("dataset_id") or "legacy",
+                                  camera_model=camera_model)
         _actualizar_puntos_gps_desde_dataset()
         state.update_state(message=f"Proyecto {project_id} borrado")
-    return {"ok": True, "mensaje": f"Proyecto {project_id} borrado"}
+    mensaje = f"Proyecto {project_id} y dataset {dataset_id} borrados" if delete_dataset else f"Proyecto {project_id} borrado"
+    return {"ok": True, "mensaje": mensaje}

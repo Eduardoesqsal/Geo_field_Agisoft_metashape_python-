@@ -14,7 +14,7 @@ from backend.services.overlay import _mapear_bandas_rgb
 
 
 class ExportacionRoiNativoTest(unittest.TestCase):
-    def test_alinea_en_calidad_baja_y_omite_nube_y_mapas_de_profundidad(self):
+    def test_alinea_rgb_en_calidad_alta_y_omite_nube_y_mapas_de_profundidad(self):
         llamadas = {}
         chunk = SimpleNamespace(
             cameras=[object()], label="RGB",
@@ -36,7 +36,7 @@ class ExportacionRoiNativoTest(unittest.TestCase):
         app.alinear_camaras()
         app.construir_mde()
 
-        self.assertEqual(llamadas["alineacion"]["downscale"], 4)
+        self.assertEqual(llamadas["alineacion"]["downscale"], 1)
         self.assertEqual(llamadas["dem"]["source_data"], "puntos_de_paso")
         self.assertEqual(llamadas["dem"]["resolution"], 0.5)
         self.assertEqual(chunk.elevation.label, "DEM - Puntos de paso")
@@ -163,7 +163,7 @@ class ExportacionRoiNativoTest(unittest.TestCase):
                 app.exportar_resultado()
 
             self.assertFalse(exportaciones[0]["clip_to_boundary"])
-            self.assertEqual(exportaciones[0]["resolution"], 0.2)
+            self.assertEqual(exportaciones[0]["resolution"], 0)
             self.assertNotEqual(exportaciones[0]["path"], salida)
             self.assertFalse(os.path.exists(exportaciones[0]["path"]))
             self.assertFalse(os.path.exists(pieza_antigua))
@@ -234,10 +234,10 @@ class ExportacionRoiNativoTest(unittest.TestCase):
 
         self.assertIs(ms.elevation, dem_ms)
         self.assertIs(rgb.elevation, dem_rgb)
-        self.assertEqual(llamadas_rgb, [{"surface_data": "elevacion", "resolution": 0.2}])
+        self.assertEqual(llamadas_rgb, [{"surface_data": "elevacion", "resolution": 0}])
         self.assertEqual(llamadas_ms, [{"surface_data": "elevacion", "resolution": 0.2}])
 
-    def test_mavic_rgb_usa_los_mismos_ajustes_rapidos(self):
+    def test_mavic_rgb_construye_orto_a_resolucion_nativa(self):
         llamadas = []
         rgb = SimpleNamespace(
             cameras=[object()], label="RGB", elevation=object(),
@@ -250,7 +250,7 @@ class ExportacionRoiNativoTest(unittest.TestCase):
 
         app.construir_ortomosaico()
 
-        self.assertEqual(llamadas, [{"surface_data": "elevacion", "resolution": 0.2}])
+        self.assertEqual(llamadas, [{"surface_data": "elevacion", "resolution": 0}])
 
     def test_rededge_sin_fotos_rgb_usa_su_dem_ms(self):
         ortomosaicos = []
@@ -462,7 +462,7 @@ class ExportacionRoiNativoTest(unittest.TestCase):
         self.assertEqual(importaciones[0]["format"], "geojson")
         self.assertEqual(importaciones[0]["crs"], "EPSG::4326")
         self.assertTrue(exportaciones[0]["clip_to_boundary"])
-        self.assertEqual(exportaciones[0]["resolution"], 0.2)
+        self.assertEqual(exportaciones[0]["resolution"], 0)
         self.assertTrue(exportaciones[0]["save_alpha"])
 
     def test_rededge_recorta_el_tiff_sin_perder_bandas(self):

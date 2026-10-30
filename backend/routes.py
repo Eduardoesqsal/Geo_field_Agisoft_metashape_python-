@@ -27,16 +27,16 @@ from backend.services.overlay import (
 )
 from backend.services.vector_overlay import cargar_y_sincronizar_desde_upload, guardar_roi_dibujado, recuperar_recorte_guardado
 from backend.services.process import detener_proceso, iniciar_proceso
+from backend.services.job_receiver import queue_files, queue_status
 from backend.services.projects import (
-    catalog_status, create_project, delete_project, prepare_dataset_upload, select_dataset, select_project,
+    catalog_status, close_project, create_project, delete_project, finish_project, prepare_dataset_upload, select_dataset, select_project,
 )
-from backend.core.paths import CLIP_GEOJSON
 
 router = APIRouter()
 
 
 def _clip_path():
-    return runtime_state.active_clip_path() if runtime_state.snapshot_ingesta_info().get("project_id") else CLIP_GEOJSON
+    return runtime_state.active_clip_path() if runtime_state.snapshot_ingesta_info().get("project_id") else None
 
 
 @router.get("/_old_root")
@@ -57,6 +57,19 @@ def status():
 @router.get("/logs")
 def get_logs():
     return {"logs": runtime_state.snapshot_logs()}
+
+
+@router.get("/trabajos")
+def trabajos():
+    return queue_status()
+
+
+@router.get("/trabajos/{organization_id}/{batch_id}/archivos")
+def archivos_trabajo(organization_id: str, batch_id: str):
+    try:
+        return {"files": queue_files(organization_id, batch_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/overlay/status")
@@ -128,7 +141,7 @@ def overlay_shapefile_status():
         "superficie_m2": superficie_m2,
         "superficie_ha": superficie_ha,
         "feature_count": feature_count,
-        "recorte_activo": os.path.exists(_clip_path()),
+        "recorte_activo": bool(_clip_path() and os.path.exists(_clip_path())),
     }
 
 
@@ -184,7 +197,7 @@ def quitar_recorte():
     with runtime_state.lock:
         if runtime_state.state.get("running"):
             raise HTTPException(status_code=409, detail="Espera a que termine el procesamiento para quitar el recorte")
-        if os.path.exists(_clip_path()):
+        if _clip_path() and os.path.exists(_clip_path()):
             os.remove(_clip_path())
     return {"ok": True, "mensaje": "Recorte desactivado. Vuelve a procesar para obtener ortomosaicos completos"}
 
@@ -244,9 +257,19 @@ def seleccionar_proyecto(project_id: str = Form(...)):
     return select_project(project_id)
 
 
+@router.post("/proyecto/finalizar")
+def finalizar_proyecto():
+    return finish_project()
+
+
+@router.post("/proyecto/cerrar")
+def cerrar_proyecto():
+    return close_project()
+
+
 @router.delete("/proyectos/{project_id}")
-def borrar_proyecto(project_id: str):
-    return delete_project(project_id)
+def borrar_proyecto(project_id: str, delete_dataset: bool = False):
+    return delete_project(project_id, delete_dataset=delete_dataset)
 
 
 @router.post("/datasets/seleccionar")

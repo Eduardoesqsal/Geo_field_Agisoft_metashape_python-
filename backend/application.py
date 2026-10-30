@@ -1,12 +1,23 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 
 import backend.runtime as runtime
 from backend.routes import router
+from backend.services.job_receiver import start_receiver, stop_receiver
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    start_receiver()
+    try:
+        yield
+    finally:
+        stop_receiver()
 
 
 def create_app():
-    app = FastAPI(title=runtime.app_title)
+    app = FastAPI(title=runtime.app_title, lifespan=lifespan)
 
     app.add_middleware(
         CORSMiddleware,

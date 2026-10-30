@@ -36,7 +36,7 @@ class OverlayRecortadoTest(unittest.TestCase):
                     ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha,
                 )
             with patch("backend.services.overlay.RUTA_ORTOMOSAICO_RGB", ruta), \
-                 patch("backend.services.overlay.CLIP_GEOJSON", limite):
+                 patch("backend.services.overlay._clip_path", return_value=limite):
                 version_sin_recorte = _cache_buster_tiles_rgb(ruta)
                 with open(limite, "w", encoding="utf-8") as archivo:
                     json.dump({"features": [{"geometry": {

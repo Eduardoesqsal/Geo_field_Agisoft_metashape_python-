@@ -11,11 +11,12 @@ from fastapi import HTTPException
 from shapely.geometry import Polygon
 
 import backend.runtime as runtime
-from backend.core.paths import CLIP_GEOJSON
 
 
 def _clip_path():
-    return runtime.active_clip_path() if runtime.snapshot_ingesta_info().get("project_id") else CLIP_GEOJSON
+    if not runtime.snapshot_ingesta_info().get("project_id"):
+        raise HTTPException(status_code=409, detail="Crea o selecciona un proyecto antes de guardar el ROI")
+    return runtime.active_clip_path()
 
 
 def _buscar_archivo_vectorial_extraido(ruta_base):
@@ -220,6 +221,8 @@ def guardar_roi_dibujado(coordenadas):
 
 
 def recuperar_recorte_guardado():
+    if not runtime.snapshot_ingesta_info().get("project_id"):
+        return
     with runtime.lock:
         if runtime.shapefile_overlay_cache.get("geojson") is not None:
             return
@@ -273,12 +276,9 @@ async def _cargar_desde_upload(upload, nombre, ext):
                 f.write(contenido)
 
         geojson, bounds, superficie_m2, superficie_ha, feature_count = _cargar_overlay_vectorial_desde_ruta(ruta_vector)
-        # KML y shapefile importados funcionan como limite del ortomosaico.
+        # Todos los formatos aceptados como ROI deben activar el recorte.
         # Guardamos GeoJSON WGS84 para el proceso externo de Metashape.
-        if formato in {"kml", "shp"}:
-            _guardar_recorte(geojson, nombre, formato)
-        elif os.path.exists(_clip_path()):
-            os.remove(_clip_path())
+        _guardar_recorte(geojson, nombre, formato)
         cache = _sincronizar_overlay_vectorial(
             geojson=geojson,
             bounds=bounds,
@@ -292,7 +292,7 @@ async def _cargar_desde_upload(upload, nombre, ext):
     runtime.push_log(f"Overlay vectorial cargado: {nombre}")
     return {
         "ok": True,
-        "mensaje": "Capa vectorial cargada: recortara los ortomosaicos" if formato in {"kml", "shp"} else "Capa vectorial cargada y visible como overlay",
+        "mensaje": "ROI cargado: recortara los ortomosaicos al procesar",
         "bounds": cache.get("bounds"),
         "cache_buster": cache.get("cache_buster"),
         "nombre": cache.get("nombre"),

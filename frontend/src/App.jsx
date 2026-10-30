@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import L from 'leaflet'
+import logo from './assets/logo.png'
 import { API_BASE, apiJson } from './utils/api'
 import { DEFAULT_CENTER } from './utils/constants'
-import { formatAreaHa, formatDate, processingProgress, stateTone } from './utils/formatters'
+import { formatAreaHa, formatDate, processingProgress } from './utils/formatters'
 
 function MapView({ points, datasetId, overlay, overlayVisible, finalMode, vectorOverlay, vectorVisible, drawingRoi, roiPoints, onRoiPoint }) {
   const mapRef = useRef(null)
@@ -45,13 +46,14 @@ function MapView({ points, datasetId, overlay, overlayVisible, finalMode, vector
     if (mapInstanceRef.current) return
 
     const map = L.map(mapRef.current, {
-      zoomControl: true,
+      zoomControl: false,
       preferCanvas: true,
       maxZoom: 24,
       zoomSnap: 0.25,
       zoomDelta: 0.5,
       scrollWheelZoom: true,
     }).setView(DEFAULT_CENTER, 5)
+    L.control.zoom({ position: 'topright' }).addTo(map)
 
     const baseLayer = new BingAerialLayer('', {
       attribution: '&copy; Microsoft Bing',
@@ -191,15 +193,6 @@ function MapView({ points, datasetId, overlay, overlayVisible, finalMode, vector
         map.setView(DEFAULT_CENTER, 5)
       }
       return
-    }
-
-    const routePoints = validPoints
-      .map((point) => [point.lat, point.lon])
-      .filter((latlng, index, all) => index === 0 || latlng[0] !== all[index - 1][0] || latlng[1] !== all[index - 1][1])
-    if (routePoints.length > 1) {
-      L.polyline(routePoints, { color: '#06b6d4', weight: 3, opacity: 0.9 })
-        .bindTooltip('Ruta de vuelo estimada por las fotos')
-        .addTo(pointsLayer)
     }
 
     validPoints.forEach((point, index) => {
@@ -436,6 +429,22 @@ function Icon({ name }) {
         <circle cx="4" cy="18" r="1" />
       </>
     ),
+    bell: (
+      <>
+        <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9Z" />
+        <path d="M10 21h4" />
+      </>
+    ),
+    polygon: (
+      <>
+        <path d="M6 5.5 18 6.5 20 17 10 20 4 16Z" strokeLinejoin="round" />
+        <circle cx="6" cy="5.5" r="1.6" fill="currentColor" stroke="none" />
+        <circle cx="18" cy="6.5" r="1.6" fill="currentColor" stroke="none" />
+        <circle cx="20" cy="17" r="1.6" fill="currentColor" stroke="none" />
+        <circle cx="10" cy="20" r="1.6" fill="currentColor" stroke="none" />
+        <circle cx="4" cy="16" r="1.6" fill="currentColor" stroke="none" />
+      </>
+    ),
     globe: (
       <>
         <path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z" />
@@ -565,6 +574,7 @@ export default function App() {
   const [overlay, setOverlay] = useState(null)
   const [overlayVisible, setOverlayVisible] = useState(true)
   const [projectName, setProjectName] = useState('')
+  const [newProjectName, setNewProjectName] = useState('')
   const [cameraModel, setCameraModel] = useState('mavic_3_rgb')
   const [driveUrl, setDriveUrl] = useState('')
   const [showDrive, setShowDrive] = useState(false)
@@ -579,9 +589,16 @@ export default function App() {
   const [roiPoints, setRoiPoints] = useState([])
   const [vectorOverlay, setVectorOverlay] = useState(null)
   const [catalog, setCatalog] = useState({ proyectos: [], datasets: [], project_id: null, dataset_id: 'legacy' })
-  const [panelOpen, setPanelOpen] = useState(window.innerWidth > 760)
+  const [jobQueue, setJobQueue] = useState({ enabled: false, running: false, jobs: [] })
+  const [activeModal, setActiveModal] = useState(null)
+  const [deletingProjectId, setDeletingProjectId] = useState(null)
+  const [savingProject, setSavingProject] = useState(false)
+  const [mapSession, setMapSession] = useState(0)
+  const [projectPrepared, setProjectPrepared] = useState(() => window.sessionStorage.getItem('geofield-project-prepared') === '1')
   const zipInputRef = useRef(null)
   const vectorInputRef = useRef(null)
+  const seenReadyJobsRef = useRef(null)
+  const promptedCompletionRef = useRef(null)
 
   const addRoiPoint = useCallback(([lon, lat]) => {
     setRoiPoints((current) => {
@@ -591,48 +608,41 @@ export default function App() {
     })
   }, [])
 
-  useEffect(() => {
-    const check = () => setPanelOpen(window.innerWidth > 760)
-    window.addEventListener('resize', check)
-    return () => window.removeEventListener('resize', check)
-  }, [])
-
   const finalMode = Boolean(status?.step === 'finalizado' && !status?.running)
   const processingPercent = processingProgress(status)
   const points = ingesta?.puntos_gps || []
-  const metrics = useMemo(
-    () => [
-      { label: 'Estado', value: status?.running ? 'Ejecutando' : status?.step || '-', icon: 'activity' },
-      { label: 'Paso', value: status?.step || '-', icon: 'flag' },
-      { label: 'Proyecto', value: ingesta?.nombre_proyecto || '-', icon: 'folder' },
-      { label: 'Modelo', value: ingesta?.camera_model || '-', icon: 'camera' },
-      { label: 'Archivos', value: ingesta?.total_archivos ?? '-', icon: 'database' },
-      { label: 'Imagenes validas', value: ingesta?.imagenes_validas ?? '-', icon: 'image' },
-      { label: 'Puntos GPS', value: points.length, icon: 'route' },
-      { label: 'Orto RGB', value: overlay?.disponible ? 'Listo' : 'No disponible', icon: 'mapPinned' },
-      { label: 'Orto MS', value: overlay?.disponible_ms ? 'Listo' : 'No disponible', icon: 'layers' },
-      { label: 'Vector', value: vectorOverlay?.disponible ? 'Listo' : 'No disponible', icon: 'map' },
-    ],
-    [status, ingesta, overlay, vectorOverlay, points.length],
-  )
+  const waitingJobs = (jobQueue.jobs || []).filter((job) => job.state === 'pending' || job.state === 'downloading' || job.state === 'ready').length
+  const processedProjects = catalog.proyectos.filter((item) => item.procesado && item.ortomosaico_listo)
 
   const refreshAll = async () => {
     setRefreshing(true)
     try {
-      const [statusData, logsData, ingestaData, overlayData, vectorData] = await Promise.all([
+      const [statusData, logsData, ingestaData, overlayData, vectorData, queueData] = await Promise.all([
         apiJson('/status'),
         apiJson('/logs'),
         apiJson('/ingesta/estado'),
         apiJson('/overlay/status'),
         apiJson('/overlay/shapefile/status'),
+        apiJson('/trabajos'),
       ])
       setStatus(statusData)
       setLogs(logsData.logs || [])
       setIngesta(ingestaData)
       setOverlay(overlayData)
       setVectorOverlay(vectorData)
-      setProjectName((current) => current || ingestaData.nombre_proyecto || '')
+      setJobQueue(queueData)
+      const readyIds = new Set((queueData.jobs || [])
+        .filter((job) => job.state === 'ready')
+        .map((job) => `${job.organization_id}:${job.batch_id}`))
+      if (seenReadyJobsRef.current) {
+        const newest = (queueData.jobs || []).find((job) => job.state === 'ready'
+          && !seenReadyJobsRef.current.has(`${job.organization_id}:${job.batch_id}`))
+        if (newest) showMessage('success', `Nuevo trabajo recibido: ${newest.job_code}`)
+      }
+      seenReadyJobsRef.current = readyIds
+      setProjectName(ingestaData.project_id ? ingestaData.nombre_proyecto || '' : '')
       setCameraModel((current) => current || ingestaData.camera_model || 'mavic_3_rgb')
+      setProjectPrepared(Boolean(ingestaData.project_id))
     } catch (error) {
       setNotice({ kind: 'error', text: error.message || 'No se pudo actualizar el estado' })
     } finally {
@@ -656,44 +666,51 @@ export default function App() {
     if (!status?.running && status?.step === 'finalizado') refreshCatalog().catch(() => {})
   }, [status?.running, status?.step])
 
+  useEffect(() => {
+    if (status?.running || status?.step !== 'finalizado' || !status.started_at || !ingesta?.project_id) return
+    const completionKey = `${ingesta.project_id}:${status.started_at}`
+    if (promptedCompletionRef.current === completionKey) return
+    promptedCompletionRef.current = completionKey
+    setActiveModal('save')
+  }, [status?.running, status?.step, status?.started_at, ingesta?.project_id])
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key !== 'Escape' || !activeModal) return
+      setActiveModal(null)
+      setDrawingRoi(false)
+      setRoiPoints([])
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [activeModal])
+
   const showMessage = (kind, text) => {
     setNotice({ kind, text })
     window.clearTimeout(showMessage._timer)
     showMessage._timer = window.setTimeout(() => setNotice(null), 4500)
   }
 
-  const saveProjectName = async () => {
-    const nombre = projectName.trim()
-    if (!nombre) {
-      showMessage('error', 'Escribe un nombre de proyecto antes de guardarlo')
+  const newProject = async () => {
+    if (!newProjectName.trim()) {
+      showMessage('error', 'Escribe el nombre del trabajo')
       return
     }
-
     try {
       const formData = new FormData()
-      formData.append('nombre', nombre)
-      const data = await apiJson('/proyecto/nombre', { method: 'POST', body: formData })
-      setProjectName(data.nombre_proyecto || nombre)
-      setIngesta((current) => ({ ...(current || {}), nombre_proyecto: data.nombre_proyecto || nombre }))
-      showMessage('success', data.mensaje || 'Nombre de proyecto guardado')
-    } catch (error) {
-      showMessage('error', error.message)
-    }
-  }
-
-  const newProject = async () => {
-    try {
-      const formData = new FormData()
-      if (projectName.trim()) formData.append('nombre', projectName.trim())
+      formData.append('nombre', newProjectName.trim())
       formData.append('camera_model', cameraModel)
       const data = await apiJson('/proyecto/nuevo', { method: 'POST', body: formData })
       setProjectName(data.nombre_proyecto || '')
+      setNewProjectName('')
       setCameraModel(data.camera_model || 'mavic_3_rgb')
       setDriveUrl('')
       setShowDrive(false)
       setUploadProgress(null)
       setDrawingRoi(false)
       setRoiPoints([])
+      setProjectPrepared(true)
+      window.sessionStorage.setItem('geofield-project-prepared', '1')
       showMessage('success', data.mensaje || 'Proyecto reiniciado')
       await refreshAll()
       await refreshCatalog()
@@ -702,7 +719,7 @@ export default function App() {
     }
   }
 
-  const selectProject = async (projectId) => {
+  const selectProject = async (projectId, openMap = false) => {
     if (!projectId) return
     try {
       const formData = new FormData()
@@ -712,8 +729,15 @@ export default function App() {
       setCameraModel(data.camera_model)
       setDrawingRoi(false)
       setRoiPoints([])
+      setProjectPrepared(true)
+      window.sessionStorage.setItem('geofield-project-prepared', '1')
       await refreshAll()
       await refreshCatalog()
+      if (openMap) {
+        setOverlayVisible(true)
+        setVectorVisible(true)
+        setActiveModal(null)
+      }
       showMessage('success', data.mensaje)
     } catch (error) {
       showMessage('error', error.message || 'No se pudo seleccionar el proyecto')
@@ -727,11 +751,37 @@ export default function App() {
     try {
       const data = await apiJson(`/proyectos/${encodeURIComponent(projectId)}`, { method: 'DELETE' })
       setProjectName('')
+      setProjectPrepared(false)
+      window.sessionStorage.removeItem('geofield-project-prepared')
       await refreshAll()
       await refreshCatalog()
       showMessage('success', data.mensaje || 'Proyecto borrado')
     } catch (error) {
       showMessage('error', error.message || 'No se pudo borrar el proyecto')
+    }
+  }
+
+  const deleteProjectAndDataset = async (project) => {
+    if (!project || status?.running || deletingProjectId || project.id.startsWith('legacy:')
+      || project.dataset_id === 'legacy' || catalog.proyectos.some(
+        (item) => item.id !== project.id && item.dataset_id === project.dataset_id,
+      )) return
+    if (!window.confirm(`¿Borrar definitivamente el proyecto "${project.nombre}" y el dataset "${project.dataset_id}" con todas sus fotos?`)) return
+    setDeletingProjectId(project.id)
+    try {
+      const data = await apiJson(`/proyectos/${encodeURIComponent(project.id)}?delete_dataset=true`, { method: 'DELETE' })
+      if (catalog.project_id === project.id) {
+        setProjectName('')
+        setProjectPrepared(false)
+        window.sessionStorage.removeItem('geofield-project-prepared')
+      }
+      await refreshAll()
+      await refreshCatalog()
+      showMessage('success', data.mensaje || 'Proyecto y dataset borrados')
+    } catch (error) {
+      showMessage('error', error.message || 'No se pudo borrar el proyecto y su dataset')
+    } finally {
+      setDeletingProjectId(null)
     }
   }
 
@@ -941,10 +991,52 @@ export default function App() {
     }
   }
 
+  const resetToBaseMap = async () => {
+    setActiveModal(null)
+    setProjectName('')
+    setNewProjectName('')
+    setProjectPrepared(false)
+    setDrawingRoi(false)
+    setRoiPoints([])
+    setOverlayVisible(true)
+    setVectorVisible(true)
+    setMapSession((current) => current + 1)
+    window.sessionStorage.removeItem('geofield-project-prepared')
+    await refreshAll()
+    await refreshCatalog()
+  }
+
+  const leaveForNextProject = async (path) => {
+    if (savingProject || status?.running) return
+    setSavingProject(true)
+    try {
+      const data = await apiJson(path, { method: 'POST' })
+      await resetToBaseMap()
+      showMessage('success', data.mensaje || 'Mapa base listo para el siguiente proyecto')
+    } catch (error) {
+      showMessage('error', error.message || 'No se pudo volver al mapa base')
+    } finally {
+      setSavingProject(false)
+    }
+  }
+
+  const saveProjectAndContinue = () => leaveForNextProject('/proyecto/finalizar')
+  const returnToBaseMap = () => leaveForNextProject('/proyecto/cerrar')
+
+  const toggleModal = (modal) => {
+    const closing = activeModal === modal
+    if (drawingRoi && (closing || modal !== 'roi')) {
+      setDrawingRoi(false)
+      setRoiPoints([])
+    }
+    setActiveModal(closing ? null : modal)
+  }
+
   return (
     <div className="app-shell">
       <div className="map-stage">
         <MapView
+          key={mapSession}
           points={points}
           datasetId={ingesta?.dataset_id}
           overlay={overlay}
@@ -956,405 +1048,284 @@ export default function App() {
           roiPoints={roiPoints}
           onRoiPoint={addRoiPoint}
         />
-        {drawingRoi && <div className="roi-map-hint">Haz clic en el mapa para marcar el ROI · {roiPoints.length} vertices</div>}
+        {drawingRoi && <div className="roi-map-hint">Marca los vértices del ROI en el mapa · {roiPoints.length} puntos</div>}
       </div>
       <div className="backdrop backdrop-a" />
       <div className="backdrop backdrop-b" />
 
-      <header className="topbar">
-        <div className="brand">
-          <h1>GEOFIELD</h1>
-        </div>
-        <div className={`status-pill ${stateTone(status)}`}>
-          <span className="status-dot" />
-          <div>
-            <strong>{status?.running ? 'Ejecutando' : status?.step || 'Listo'}</strong>
-            <span>{status?.message || 'Esperando accion'}</span>
-          </div>
-        </div>
+      <header className="topbar workspace-topbar">
+        <div className="brand"><img src={logo} alt="GeoField" /></div>
       </header>
 
-      <button
-        className={`panel-toggle ${panelOpen ? 'is-open' : ''}`}
-        onClick={() => setPanelOpen((v) => !v)}
-        aria-label="Alternar panel de control"
-      >
-        <Icon name={panelOpen ? 'x' : 'menu'} />
-      </button>
+      <nav className="workspace-dock workspace-dock-left" aria-label="Herramientas de trabajo">
+        <button type="button" className={`dock-button ${activeModal === 'jobs' ? 'is-active' : ''} ${waitingJobs ? 'has-jobs' : ''}`}
+          onClick={() => toggleModal('jobs')} title="Trabajos recibidos" aria-label="Trabajos recibidos">
+          <Icon name="bell" />
+          {waitingJobs > 0 && <span className="dock-count">{waitingJobs > 99 ? '99+' : waitingJobs}</span>}
+        </button>
+        <button type="button" className={`dock-button ${activeModal === 'project' ? 'is-active' : ''}`}
+          onClick={() => toggleModal('project')} title="Crear proyecto" aria-label="Crear proyecto">
+          <Icon name="folder" />
+        </button>
+        <button type="button" className={`dock-button ${activeModal === 'images' ? 'is-active' : ''}`}
+          onClick={() => toggleModal('images')} title="Imágenes" aria-label="Imágenes"
+          disabled={!projectPrepared}>
+          <Icon name="fileUp" />
+          {(ingesta?.imagenes_validas || 0) > 0 && <span className="dock-count dock-count-photos">{ingesta.imagenes_validas > 99 ? '99+' : ingesta.imagenes_validas}</span>}
+        </button>
+        <button type="button" className={`dock-button ${activeModal === 'roi' ? 'is-active' : ''}`}
+          onClick={() => toggleModal('roi')} title="Importar o dibujar ROI" aria-label="Importar o dibujar ROI"
+          disabled={!projectPrepared}>
+          <Icon name="polygon" />
+          {vectorOverlay?.recorte_activo && <span className="dock-roi-ready" aria-label="ROI activo" />}
+        </button>
+        <button type="button" className={`dock-button ${activeModal === 'delete' ? 'is-active' : ''}`}
+          onClick={() => { if (activeModal !== 'delete') refreshCatalog().catch(() => {}); toggleModal('delete') }}
+          title="Proyectos procesados" aria-label="Proyectos procesados">
+          <Icon name="map" />
+        </button>
+      </nav>
 
-      <aside className={`control-panel ${panelOpen ? 'panel-open' : 'panel-closed'}`}>
-        <div className="panel-layout">
-          <div className="panel-top">
-            <div className="panel-column panel-column-left">
-            <section className="card glass-card panel-mini-card panel-control-card">
-              <div className="section-head">
-                <h2>
-                  <Icon name="mapPinned" />
-                  Centro de control
+      <div className="workspace-dock workspace-dock-right">
+        <button type="button" className={`dock-button ${activeModal === 'logs' ? 'is-active' : ''}`}
+          onClick={() => toggleModal('logs')} title="Ver logs" aria-label="Ver logs">
+          <Icon name="list" />
+        </button>
+      </div>
+
+      {activeModal && (
+        <div className={`workspace-modal-layer ${drawingRoi ? 'is-drawing' : ''}`}
+          onMouseDown={(event) => { if (event.target === event.currentTarget && !drawingRoi) setActiveModal(null) }}>
+          <section className={`workspace-modal workspace-modal-${activeModal}`} role="dialog"
+            aria-modal={!drawingRoi} aria-labelledby="workspace-modal-title">
+            <div className="workspace-modal-header">
+              <div>
+                <span className="workspace-eyebrow">GEOFIELD · MOTOR LOCAL</span>
+                <h2 id="workspace-modal-title">
+                  {activeModal === 'jobs' && 'Trabajos recibidos'}
+                  {activeModal === 'project' && 'Crear proyecto'}
+                  {activeModal === 'images' && 'Imágenes'}
+                  {activeModal === 'roi' && 'Importar o dibujar ROI'}
+                  {activeModal === 'logs' && 'Logs de procesamiento'}
+                  {activeModal === 'delete' && 'Proyectos procesados'}
+                  {activeModal === 'save' && 'Proyecto terminado'}
                 </h2>
-                <span>{overlay?.disponible ? 'Overlay listo' : 'Sin overlay'}</span>
               </div>
-              <div className="panel-badge panel-badge-wide">
-                <Icon name="activity" />
-                <span>{finalMode ? 'RGB en tiles' : 'Vista de vuelo'}</span>
-              </div>
-              <button
-                className="secondary layer-toggle"
-                onClick={() => setOverlayVisible((value) => !value)}
-                disabled={!overlay?.disponible}
-              >
-                <Icon name="mapPinned" />
-                {overlayVisible ? 'Ocultar ortomosaico' : 'Mostrar ortomosaico'}
+              <button className="modal-close" type="button" aria-label="Cerrar"
+                onClick={() => { setActiveModal(null); setDrawingRoi(false); setRoiPoints([]) }}>
+                <Icon name="x" />
               </button>
-            </section>
-
-            <section className="card glass-card panel-state-card">
-              <div className="section-head">
-                <h2>
-                  <Icon name="globe" />
-                  Estado
-                </h2>
-                <span>{formatDate(status?.started_at)}</span>
-              </div>
-              <dl className="status-list status-list-tight">
-                <div>
-                  <span className="detail-icon"><Icon name="play" /></span>
-                  <div className="detail-copy">
-                    <dt>Inicio</dt>
-                    <dd>{formatDate(status?.started_at)}</dd>
-                  </div>
-                </div>
-                <div>
-                  <span className="detail-icon"><Icon name="flag" /></span>
-                  <div className="detail-copy">
-                    <dt>Fin</dt>
-                    <dd>{formatDate(status?.finished_at)}</dd>
-                  </div>
-                </div>
-                <div>
-                  <span className="detail-icon"><Icon name="database" /></span>
-                  <div className="detail-copy">
-                    <dt>Origen</dt>
-                    <dd>{ingesta?.origen || '-'}</dd>
-                  </div>
-                </div>
-                <div>
-                  <span className="detail-icon"><Icon name="clock" /></span>
-                  <div className="detail-copy">
-                    <dt>Actualizado</dt>
-                    <dd>{formatDate(ingesta?.actualizado_en)}</dd>
-                  </div>
-                </div>
-              </dl>
-              <div className="progress-wrap process-progress" aria-live="polite">
-                <div className="progress-label">
-                  <span>{status?.running ? 'Progreso del procesamiento' : status?.step === 'finalizado' ? 'Procesamiento terminado' : 'Progreso'}</span>
-                  <strong>{processingPercent}%</strong>
-                </div>
-                <div
-                  className="progress-bar"
-                  role="progressbar"
-                  aria-valuemin="0"
-                  aria-valuemax="100"
-                  aria-valuenow={processingPercent}
-                >
-                  <div className="progress-fill progress-fill-processing" style={{ width: `${processingPercent}%` }} />
-                </div>
-                <span className="process-progress-message">{status?.message || 'Esperando accion'}</span>
-              </div>
-            </section>
-
-            <section className="card glass-card panel-vector-card">
-              <div className="section-head">
-                <h2>
-                  <Icon name="map" />
-                  Capa vectorial
-                </h2>
-                <span>
-                  {vectorOverlay?.disponible ? (vectorVisible ? 'Polígono visible' : 'Polígono oculto') : 'Sin capa'}
-                </span>
-              </div>
-              <div className="vector-summary">
-                <div>
-                  <span className="detail-icon"><Icon name="folder" /></span>
-                  <span className="detail-copy">
-                    <span>Nombre</span>
-                    <strong>{vectorOverlay?.nombre || '-'}</strong>
-                  </span>
-                </div>
-                <div>
-                  <span className="detail-icon"><Icon name="layers" /></span>
-                  <span className="detail-copy">
-                    <span>Formato</span>
-                    <strong>{vectorOverlay?.formato || '-'}</strong>
-                  </span>
-                </div>
-                <div>
-                  <span className="detail-icon"><Icon name="map" /></span>
-                  <span className="detail-copy">
-                    <span>Superficie</span>
-                    <strong>{formatAreaHa(vectorOverlay?.superficie_ha)}</strong>
-                  </span>
-                </div>
-                <div>
-                  <span className="detail-icon"><Icon name="target" /></span>
-                  <span className="detail-copy">
-                    <span>Poligonos</span>
-                    <strong>{vectorOverlay?.feature_count ?? '-'}</strong>
-                  </span>
-                </div>
-              </div>
-              <div className="vector-actions">
-                <button className="round-action is-accent" onClick={uploadVector} disabled={status?.running || drawingRoi}>
-                  <span className="round-action-icon"><Icon name="upload" /></span>
-                  <span>Importar capa</span>
-                </button>
-                {!drawingRoi && (
-                  <button className="round-action is-accent" onClick={() => { setRoiPoints([]); setDrawingRoi(true) }} disabled={status?.running}>
-                    <span className="round-action-icon"><Icon name="target" /></span>
-                    <span>Dibujar ROI</span>
-                  </button>
-                )}
-                {drawingRoi && (
-                  <>
-                    <button className="round-action is-primary" onClick={saveRoi} disabled={roiPoints.length < 3}>
-                      <span className="round-action-icon"><Icon name="save" /></span>
-                      <span>Guardar ROI</span>
-                    </button>
-                    <button className="round-action" onClick={() => setRoiPoints((points) => points.slice(0, -1))} disabled={!roiPoints.length}>
-                      <span className="round-action-icon"><Icon name="refresh" /></span>
-                      <span>Deshacer punto</span>
-                    </button>
-                    <button className="round-action" onClick={() => { setDrawingRoi(false); setRoiPoints([]) }}>
-                      <span className="round-action-icon"><Icon name="stop" /></span>
-                      <span>Cancelar dibujo</span>
-                    </button>
-                  </>
-                )}
-                <button
-                  className="round-action"
-                  onClick={() => setVectorVisible((value) => !value)}
-                  disabled={!vectorOverlay?.disponible}
-                  aria-pressed={vectorVisible && Boolean(vectorOverlay?.disponible)}
-                >
-                  <span className="round-action-icon"><Icon name="mapPinned" /></span>
-                  <span>{vectorVisible ? 'Ocultar polígono' : 'Mostrar polígono'}</span>
-                </button>
-                {vectorOverlay?.recorte_activo && (
-                  <button className="round-action" onClick={removeClip} disabled={status?.running || drawingRoi}>
-                    <span className="round-action-icon"><Icon name="target" /></span>
-                    <span>Quitar recorte</span>
-                  </button>
-                )}
-              </div>
-              <p className="vector-clip-note">
-                {vectorOverlay?.recorte_activo
-                  ? cameraModel === 'rededge_m'
-                    ? 'Al procesar, el ROI recortará el TIFF MicaSense y conservará sus cinco bandas originales más Alpha.'
-                    : 'Al procesar, el ROI recortará los ortomosaicos RGB y multiespectral. Fuera del polígono quedará transparente.'
-                  : drawingRoi
-                    ? 'Haz clic en el mapa para marcar al menos tres vertices y luego pulsa Guardar ROI.'
-                    : 'Importa un KML o dibuja un ROI en el mapa. Sin recorte se exportan los ortomosaicos completos.'}
-              </p>
-            </section>
-
             </div>
 
-            <div className="panel-column panel-column-right">
-              <section className="card glass-card panel-span-compact">
-              <div className="section-head">
-                <h2>
-                  <Icon name="list" />
-                  Logs
-                </h2>
-                  <span>{logs.length} lineas</span>
+            {activeModal === 'jobs' && (
+              <div className="workspace-modal-content">
+                <div className="workspace-inline-status">
+                  <span className={`workspace-connection-dot ${jobQueue.running ? 'is-online' : ''}`} />
+                  <span>{jobQueue.running ? 'Receptor activo' : 'Receptor sin configurar'}</span>
+                  <strong>{waitingJobs} en cola</strong>
                 </div>
-                <pre className="logs-panel logs-panel-tight">{logs.length ? logs.join('\n') : 'Esperando eventos...'}</pre>
-              </section>
-
-              <section className="card glass-card panel-span-compact">
-              <div className="section-head">
-                <h2>
-                  <Icon name="chart" />
-                  Resumen
-                </h2>
-                  <span>{metrics.length} indicadores</span>
+                {jobQueue.error && <p className="job-queue-error">{jobQueue.error}</p>}
+                <div className="workspace-table-wrap">
+                  <table className="workspace-table">
+                    <thead><tr><th>Trabajo</th><th>Organización</th><th>ZIP</th><th>Estado</th><th>Actualizado</th></tr></thead>
+                    <tbody>
+                      {(jobQueue.jobs || []).map((job) => (
+                        <tr key={`${job.organization_id}:${job.batch_id}`}>
+                          <td><strong>{job.job_code}</strong>{job.error && <small className="job-queue-error">{job.error}</small>}</td>
+                          <td>{job.organization_name || job.organization_id}</td>
+                          <td>{job.file_count}</td>
+                          <td><span className={`job-queue-state job-queue-state-${job.state}`}>
+                            {({ pending: 'Nuevo', downloading: 'Descargando', ready: 'En espera', error: 'Error' })[job.state] || job.state}
+                          </span></td>
+                          <td>{formatDate(job.updated_at)}</td>
+                        </tr>
+                      ))}
+                      {!jobQueue.jobs?.length && <tr><td colSpan="5" className="workspace-empty">Aún no hay trabajos recibidos.</td></tr>}
+                    </tbody>
+                  </table>
                 </div>
-                <div className="metrics-grid metrics-grid-compact metrics-grid-2">
-                  {metrics.map((item) => (
-                    <article className="metric metric-light" key={item.label}>
-                      <span className="metric-icon"><Icon name={item.icon} /></span>
-                      <span className="metric-copy">
-                        <span>{item.label}</span>
-                        <strong>{item.value}</strong>
-                      </span>
-                    </article>
-                  ))}
-                </div>
-              </section>
-            </div>
-          </div>
+                <button className="round-action" onClick={refreshAll} disabled={refreshing}><Icon name="refresh" /> Actualizar</button>
+              </div>
+            )}
 
-          <section className="card glass-card panel-span-compact panel-bottom-card panel-control-card">
-            <div className="section-head">
-              <h2>
-                <Icon name="sliders" />
-                Controles
-              </h2>
-              <span>{status?.running ? 'Proceso activo' : 'Listo para iniciar'}</span>
-            </div>
-
-              <div className="toolbar-grid toolbar-grid-compact">
-              <label className="field">
-                  <span className="field-label"><Icon name="folder" /> Proyectos guardados</span>
-                  <select
-                    value={catalog.project_id || ''}
-                    onChange={(event) => selectProject(event.target.value)}
-                    disabled={status?.running}
-                  >
-                    <option value="">Seleccionar proyecto</option>
-                    {catalog.proyectos.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.nombre}
-                      </option>
-                    ))}
-                  </select>
+            {activeModal === 'project' && (
+              <div className="workspace-modal-content workspace-form">
+                <label className="field"><span className="field-label">Nombre del trabajo</span>
+                  <input value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)}
+                    placeholder="Ej: Rancho_2026_10_30" disabled={status?.running} autoFocus />
                 </label>
-                <label className="field">
-                  <span className="field-label"><Icon name="database" /> Dataset de fotos</span>
-                  <select
-                    value={catalog.datasets.some((item) => item.id === catalog.dataset_id) ? catalog.dataset_id : ''}
-                    onChange={(event) => selectDataset(event.target.value)}
-                    disabled={status?.running}
-                  >
-                    <option value="">Seleccionar dataset</option>
-                    {catalog.datasets.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.nombre} · {item.imagenes_validas} fotos
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              <label className="field">
-                  <span className="field-label">
-                    <Icon name="folder" />
-                    Nombre del proyecto
-                  </span>
-                  <input
-                    value={projectName}
-                    onChange={(event) => setProjectName(event.target.value)}
-                    placeholder="test_agisoft"
-                  />
-                </label>
-                <label className="field">
-                  <span className="field-label">
-                    <Icon name="camera" />
-                    Modelo de camara
-                  </span>
-                  <select value={cameraModel} onChange={(event) => setCameraModel(event.target.value)}>
+                <label className="field"><span className="field-label">Sensor</span>
+                  <select value={cameraModel} onChange={(event) => setCameraModel(event.target.value)} disabled={status?.running}>
                     <option value="mavic_3_rgb">Mavic 3 RGB</option>
                     <option value="mavic_3m">Mavic 3 Multispectral</option>
                     <option value="rededge_m">MicaSense RedEdge-M</option>
                   </select>
-              </label>
-            </div>
-            <p className="project-help">La carpeta del proyecto se crea al procesar. Si vuelves a procesarlo, se actualiza en la misma carpeta. Los datasets de fotos se conservan por separado.</p>
+                </label>
+                <button className="round-action is-primary workspace-primary-action" onClick={newProject} disabled={status?.running || !newProjectName.trim()}>
+                  <Icon name="folder" /> Crear proyecto
+                </button>
+                <details className="workspace-existing-projects">
+                  <summary>Proyectos guardados</summary>
+                  <label className="field"><span className="field-label">Abrir proyecto existente</span>
+                    <select value={catalog.project_id || ''} onChange={(event) => selectProject(event.target.value)} disabled={status?.running}>
+                      <option value="">Seleccionar proyecto</option>
+                      {catalog.proyectos.map((item) => <option key={item.id} value={item.id}>{item.nombre}</option>)}
+                    </select>
+                  </label>
+                  <button className="round-action is-danger" onClick={deleteProject}
+                    disabled={status?.running || !catalog.project_id || catalog.project_id.startsWith('legacy:')}>
+                    <Icon name="trash" /> Borrar proyecto seleccionado
+                  </button>
+                </details>
+              </div>
+            )}
 
-              <div className="action-row action-row-tight">
-                <button className="round-action is-primary" onClick={startProcess} disabled={status?.running || drawingRoi}>
-                  <span className="round-action-icon"><Icon name="play" /></span>
-                  <span>Procesar</span>
-                </button>
-                <button className="round-action" onClick={refreshAll} disabled={refreshing}>
-                  <span className="round-action-icon"><Icon name="refresh" /></span>
-                  <span>Actualizar</span>
-                </button>
-                <button className="round-action is-warning" onClick={stopProcess} disabled={!status?.running}>
-                  <span className="round-action-icon"><Icon name="stop" /></span>
-                  <span>Detener</span>
-                </button>
-                <button className="round-action is-accent" onClick={uploadZip} disabled={status?.running}>
-                  <span className="round-action-icon"><Icon name="upload" /></span>
-                  <span>Subir ZIP</span>
-                </button>
-                <button className="round-action is-accent" onClick={() => setShowDrive((value) => !value)} disabled={status?.running}>
-                  <span className="round-action-icon"><Icon name="cloud" /></span>
-                  <span>Enlace Drive</span>
-                </button>
-                <button className="round-action" onClick={saveProjectName} disabled={status?.running}>
-                  <span className="round-action-icon"><Icon name="save" /></span>
-                  <span>Guardar nombre</span>
-                </button>
-                <button className="round-action" onClick={newProject} disabled={status?.running}>
-                  <span className="round-action-icon"><Icon name="folder" /></span>
-                  <span>Nuevo proyecto</span>
-                </button>
-                <button className="round-action is-danger" onClick={deleteProject} disabled={status?.running || !catalog.project_id || catalog.project_id.startsWith('legacy:')}>
-                  <span className="round-action-icon"><Icon name="trash" /></span>
-                  <span>Borrar proyecto</span>
+            {activeModal === 'images' && (
+              <div className="workspace-modal-content workspace-images-content">
+                <div className="workspace-photo-count">
+                  <Icon name="image" />
+                  <div><strong>{ingesta?.imagenes_validas ?? 0} fotos</strong><span>{projectName || 'Proyecto actual'}</span></div>
+                </div>
+                <p className="project-help">Sube las fotos originales en ZIP. Sus ubicaciones aparecerán como puntos azules en el mapa.</p>
+                <div className="workspace-action-row">
+                  <button className="round-action is-accent" onClick={uploadZip} disabled={status?.running}><Icon name="upload" /> Subir imágenes ZIP</button>
+                  <button className="round-action" onClick={() => setShowDrive((value) => !value)} disabled={status?.running}><Icon name="cloud" /> Importar desde Drive</button>
+                </div>
+                {showDrive && <div className="drive-box drive-box-white">
+                  <input value={driveUrl} onChange={(event) => setDriveUrl(event.target.value)} placeholder="URL de Drive o ruta rclone" />
+                  <button className="primary" onClick={submitDrive}>Importar</button>
+                </div>}
+                {uploadProgress !== null && <div className="progress-wrap"><div className="progress-label">ZIP: {uploadProgress}%</div>
+                  <div className="progress-bar"><div className="progress-fill" style={{ width: `${uploadProgress}%` }} /></div></div>}
+                <label className="field"><span className="field-label">Dataset de fotos</span>
+                  <select value={catalog.datasets.some((item) => item.id === catalog.dataset_id) ? catalog.dataset_id : ''}
+                    onChange={(event) => selectDataset(event.target.value)} disabled={status?.running}>
+                    <option value="">Seleccionar dataset</option>
+                    {catalog.datasets.map((item) => <option key={item.id} value={item.id}>{item.nombre} · {item.imagenes_validas} fotos</option>)}
+                  </select>
+                </label>
+
+                <div className="workspace-divider" />
+                <div className="workspace-action-row">
+                  <button className="round-action is-primary" onClick={startProcess} disabled={status?.running || drawingRoi || !(ingesta?.imagenes_validas > 0)}>
+                    <Icon name="play" /> Procesar proyecto
+                  </button>
+                  <button className="round-action is-warning" onClick={stopProcess} disabled={!status?.running}><Icon name="stop" /> Detener</button>
+                  <button className="round-action" onClick={() => setOverlayVisible((value) => !value)} disabled={!overlay?.disponible}>
+                    <Icon name="layers" /> {overlayVisible ? 'Ocultar ortomosaico' : 'Mostrar ortomosaico'}
+                  </button>
+                </div>
+                {finalMode && ingesta?.project_id && <button className="round-action is-primary workspace-primary-action" onClick={() => setActiveModal('save')}>
+                  <Icon name="save" /> Guardar y volver al mapa base
+                </button>}
+              </div>
+            )}
+
+            {activeModal === 'roi' && (
+              <div className="workspace-modal-content workspace-roi-content">
+                <div className="workspace-section-title"><h3>Área de interés</h3><span>{vectorOverlay?.recorte_activo ? 'Recorte activo' : 'Sin recorte'}</span></div>
+                <p className="project-help">Importa KML, KMZ, GeoJSON o un shapefile en ZIP; también puedes dibujar el ROI sobre el mapa.</p>
+                <div className="workspace-action-row">
+                  <button className="round-action is-accent" onClick={uploadVector} disabled={status?.running || drawingRoi}>
+                    <Icon name="polygon" /> Importar ROI
+                  </button>
+                  {!drawingRoi && <button className="round-action" onClick={() => { setRoiPoints([]); setDrawingRoi(true) }} disabled={status?.running}>
+                    <Icon name="target" /> Dibujar polígono
+                  </button>}
+                  {drawingRoi && <>
+                    <button className="round-action is-primary" onClick={saveRoi} disabled={roiPoints.length < 3}><Icon name="save" /> Guardar ROI</button>
+                    <button className="round-action" onClick={() => setRoiPoints((current) => current.slice(0, -1))} disabled={!roiPoints.length}><Icon name="refresh" /> Deshacer</button>
+                    <button className="round-action" onClick={() => { setDrawingRoi(false); setRoiPoints([]) }}><Icon name="x" /> Cancelar dibujo</button>
+                  </>}
+                </div>
+                {drawingRoi && <p className="vector-clip-note">Marca al menos tres puntos en el mapa y pulsa Guardar ROI. Este modal permanece abierto mientras dibujas.</p>}
+                {vectorUploadProgress !== null && <div className="progress-wrap"><div className="progress-label">ROI: {vectorUploadProgress}%</div>
+                  <div className="progress-bar"><div className="progress-fill" style={{ width: `${vectorUploadProgress}%` }} /></div></div>}
+                {vectorOverlay?.disponible && <div className="workspace-roi-details">
+                  <span>{vectorOverlay.nombre || 'ROI'} · {formatAreaHa(vectorOverlay.superficie_ha)}</span>
+                  <button className="round-action" onClick={() => setVectorVisible((value) => !value)} aria-pressed={vectorVisible}>
+                    <Icon name="mapPinned" /> {vectorVisible ? 'Ocultar ROI' : 'Mostrar ROI'}
+                  </button>
+                  {vectorOverlay.recorte_activo && <button className="round-action" onClick={removeClip} disabled={status?.running || drawingRoi}>
+                    Quitar recorte
+                  </button>}
+                </div>}
+                {vectorOverlay?.recorte_activo && <p className="project-help">Mostrar u ocultar cambia la vista del mapa. «Quitar recorte» desactiva el recorte del siguiente procesamiento.</p>}
+              </div>
+            )}
+
+            {activeModal === 'save' && (
+              <div className="workspace-modal-content workspace-form">
+                <p className="project-help">El procesamiento de <strong>{ingesta?.nombre_proyecto || 'este proyecto'}</strong> terminó. Sus archivos ya están en la carpeta del proyecto.</p>
+                <p className="project-help">¿Guardar el trabajo y volver al mapa base para comenzar el siguiente?</p>
+                <div className="workspace-action-row">
+                  <button className="round-action is-primary" onClick={saveProjectAndContinue} disabled={savingProject}>
+                    <Icon name="save" /> {savingProject ? 'Guardando...' : 'Sí, guardar y continuar'}
+                  </button>
+                  <button className="round-action" onClick={() => setActiveModal(null)} disabled={savingProject}>Seguir revisando</button>
+                </div>
+              </div>
+            )}
+
+            {activeModal === 'delete' && (
+              <div className="workspace-modal-content">
+                <p className="project-help">Selecciona un proyecto para ver su ortomosaico en el mapa. También puedes borrarlo junto con las fotos de su dataset.</p>
+                <div className="workspace-table-wrap">
+                  <table className="workspace-table">
+                    <thead><tr><th>Proyecto</th><th>Sensor</th><th>Dataset</th><th>Fotos</th><th>Acción</th></tr></thead>
+                    <tbody>
+                      {processedProjects.map((project) => {
+                        const shared = catalog.proyectos.some((item) => item.id !== project.id && item.dataset_id === project.dataset_id)
+                        const blocked = project.id.startsWith('legacy:') || project.dataset_id === 'legacy' || shared
+                        const reason = project.id.startsWith('legacy:') ? 'Proyecto antiguo sin carpeta propia'
+                          : project.dataset_id === 'legacy' ? 'Dataset original compartido'
+                            : shared ? 'Dataset usado por otro proyecto' : null
+                        return <tr key={project.id}>
+                          <td><strong>{project.nombre}</strong></td>
+                          <td>{({ mavic_3_rgb: 'Mavic 3 RGB', mavic_3m: 'Mavic 3 MS', rededge_m: 'MicaSense RedEdge-M' })[project.camera_model] || project.camera_model || '-'}</td>
+                          <td>{project.dataset_id || '-'}</td>
+                          <td>{catalog.datasets.find((item) => item.id === project.dataset_id)?.imagenes_validas ?? 0}</td>
+                          <td><div className="workspace-action-row">
+                            <button type="button" className="round-action is-primary" onClick={() => selectProject(project.id, true)}
+                              disabled={status?.running || Boolean(deletingProjectId)} title={`Ver ortomosaico de ${project.nombre}`}>
+                              <Icon name="map" /> Ver orto
+                            </button>
+                            <button type="button" className="round-action is-danger" onClick={() => deleteProjectAndDataset(project)}
+                              disabled={status?.running || Boolean(deletingProjectId) || blocked}
+                              title={reason || 'Borrar proyecto y dataset'}>
+                              <Icon name="trash" /> {deletingProjectId === project.id ? 'Borrando...' : 'Borrar todo'}
+                            </button>
+                          </div>{reason && <small>{reason}</small>}</td>
+                        </tr>
+                      })}
+                      {!processedProjects.length && <tr><td colSpan="5" className="workspace-empty">Aún no hay proyectos procesados.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+                <button className="round-action" onClick={refreshCatalog} disabled={Boolean(deletingProjectId)}><Icon name="refresh" /> Actualizar</button>
+                <button className="round-action is-primary workspace-primary-action" onClick={returnToBaseMap}
+                  disabled={status?.running || savingProject || Boolean(deletingProjectId)}>
+                  <Icon name="map" /> {savingProject ? 'Volviendo al mapa...' : 'Volver al mapa base para el siguiente proyecto'}
                 </button>
               </div>
+            )}
 
-            <input
-              ref={zipInputRef}
-              key={zipFileKey}
-              type="file"
-              accept=".zip"
-              hidden
-              onChange={handleZipChange}
-            />
-
-            <input
-              ref={vectorInputRef}
-              key={vectorFileKey}
-              type="file"
-              accept=".zip,.kml,.kmz,.geojson,.json,.shp"
-              hidden
-              onChange={handleVectorChange}
-            />
-
-            {showDrive ? (
-              <div className="drive-box drive-box-white">
-                <input
-                  value={driveUrl}
-                  onChange={(event) => setDriveUrl(event.target.value)}
-                  placeholder="URL de Drive o ruta rclone: gdrive:MisImagenes/Vuelo01"
-                />
-                <button className="primary" onClick={submitDrive}>
-                  Enviar
-                </button>
-                <button className="secondary" onClick={() => setShowDrive(false)}>
-                  Cancelar
-                </button>
+            {activeModal === 'logs' && (
+              <div className="workspace-modal-content">
+                <div className="workspace-inline-status"><span className="status-dot" />
+                  <span>{status?.message || 'Esperando eventos'}</span><strong>{processingPercent}%</strong></div>
+                <div className="progress-bar"><div className="progress-fill progress-fill-processing" style={{ width: `${processingPercent}%` }} /></div>
+                <pre className="logs-panel workspace-logs">{logs.length ? logs.join('\n') : 'Esperando eventos...'}</pre>
+                <button className="round-action" onClick={refreshAll} disabled={refreshing}><Icon name="refresh" /> Actualizar logs</button>
               </div>
-            ) : null}
-
-            {uploadProgress !== null ? (
-              <div className="progress-wrap">
-                <div className="progress-label">
-                  {uploadProgress < 100 ? `Subiendo ZIP: ${uploadProgress}%` : 'ZIP cargado'}
-                </div>
-                <div className="progress-bar">
-                  <div className="progress-fill" style={{ width: `${uploadProgress}%` }} />
-                </div>
-              </div>
-            ) : null}
-
-            {vectorUploadProgress !== null ? (
-              <div className="progress-wrap">
-                <div className="progress-label">
-                  {vectorUploadProgress < 100 ? `Importando capa: ${vectorUploadProgress}%` : 'Capa importada'}
-                </div>
-                <div className="progress-bar">
-                  <div className="progress-fill progress-fill-vector" style={{ width: `${vectorUploadProgress}%` }} />
-                </div>
-              </div>
-            ) : null}
-
-            {notice ? <div className={`notice ${notice.kind}`}>{notice.text}</div> : null}
+            )}
           </section>
         </div>
-      </aside>
+      )}
+
+      <input ref={zipInputRef} key={zipFileKey} type="file" accept=".zip" hidden onChange={handleZipChange} />
+      <input ref={vectorInputRef} key={vectorFileKey} type="file" accept=".zip,.kml,.kmz,.geojson" hidden onChange={handleVectorChange} />
+      {notice && <div className={`notice workspace-notice ${notice.kind}`} role="status">{notice.text}</div>}
     </div>
   )
 }

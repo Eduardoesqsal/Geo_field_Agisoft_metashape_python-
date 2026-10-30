@@ -30,9 +30,11 @@ class ProcesamientoMetashape:
     REDEDGE_RGB_STRETCH = (2, 98)
     REDEDGE_RGB_GAMMA = 1.15
     ALIGNMENT_DOWNSCALE = 4
+    RGB_ALIGNMENT_DOWNSCALE = 1
     REDEDGE_MIN_ALIGNED_FRACTION = 0.90
     DEM_RESOLUTION_METERS = 0.5
     ORTHOMOSAIC_RESOLUTION_METERS = 0.2
+    RGB_ORTHOMOSAIC_RESOLUTION_METERS = 0
 
     def __init__(self, progress_callback=None, camera_model=None):
         self.doc = None
@@ -205,15 +207,16 @@ class ProcesamientoMetashape:
 
     def alinear_camaras(self):
         if self.camera_model == "rededge_m":
-            self._log("[2/5] Alineando MicaSense en calidad media")
+            self._log("[2/5] Alineando RGB en calidad alta y MicaSense MS en calidad media")
         else:
-            self._log("[2/5] Alineando camaras en calidad baja")
+            self._log("[2/5] Alineando RGB en calidad alta y MS con sus ajustes actuales")
         Metashape = self._ms()
         for chunk in self._obtener_chunks():
             if not chunk.cameras:
                 continue
+            es_rgb = (getattr(chunk, "label", "") or "").strip().lower() == "rgb"
             kwargs = {
-                "downscale": self.ALIGNMENT_DOWNSCALE,
+                "downscale": self.RGB_ALIGNMENT_DOWNSCALE if es_rgb else self.ALIGNMENT_DOWNSCALE,
                 "generic_preselection": True,
                 "reference_preselection": True,
             }
@@ -323,11 +326,16 @@ class ProcesamientoMetashape:
                 continue
             if getattr(chunk, "elevation", None) is None:
                 raise RuntimeError(f"El ortomosaico {etiqueta.upper()} necesita su propio DEM")
+            resolucion_metros = (
+                self.RGB_ORTHOMOSAIC_RESOLUTION_METERS if etiqueta == "rgb"
+                else self.ORTHOMOSAIC_RESOLUTION_METERS
+            )
             chunk.buildOrthomosaic(
                 surface_data=elevation_data,
-                resolution=self.ORTHOMOSAIC_RESOLUTION_METERS,
+                resolution=resolucion_metros,
             )
-            self._log(f"[4/5] Ortofoto construida con DEM propio ({self.ORTHOMOSAIC_RESOLUTION_METERS:g} m/pixel): {etiqueta.upper()}")
+            resolucion = "nativa" if etiqueta == "rgb" else f"{self.ORTHOMOSAIC_RESOLUTION_METERS:g} m/pixel"
+            self._log(f"[4/5] Ortofoto construida con DEM propio (resolucion {resolucion}): {etiqueta.upper()}")
         self._guardar_documento()
 
     def _proyeccion_utm_ms(self, chunk):
@@ -562,7 +570,11 @@ class ProcesamientoMetashape:
 
             kwargs = {"path": destino}
             kwargs.update(opciones or {})
-            kwargs["resolution"] = self.ORTHOMOSAIC_RESOLUTION_METERS
+            etiqueta_chunk = (getattr(chunk, "label", "") or "").strip().lower()
+            kwargs["resolution"] = (
+                self.RGB_ORTHOMOSAIC_RESOLUTION_METERS if etiqueta_chunk == "rgb"
+                else self.ORTHOMOSAIC_RESOLUTION_METERS
+            )
             if orthomosaic_data is not None:
                 kwargs["source_data"] = orthomosaic_data
             if compression is not None and usar_compresion:

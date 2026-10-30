@@ -12,6 +12,7 @@ frontend/dist/
 # Runtime outputs
 logs/
 proyecto/
+incoming/
 
 # Local data drops
 dataset/

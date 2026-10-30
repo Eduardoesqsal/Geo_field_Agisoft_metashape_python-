@@ -22,7 +22,6 @@ from rasterio.warp import transform_bounds, transform_geom
 
 import backend.runtime as runtime
 from backend.config import RUTA_ORTOMOSAICO_MS, RUTA_ORTOMOSAICO_RGB
-from backend.core.paths import CLIP_GEOJSON
 
 
 _RGB_PROFILE_CACHE = {}
@@ -33,7 +32,7 @@ RGB_TILE_RENDER_VERSION = "rgb-roi-mask-v5"
 
 
 def _clip_path():
-    return runtime.active_clip_path() if runtime.snapshot_ingesta_info().get("project_id") else CLIP_GEOJSON
+    return runtime.active_clip_path() if runtime.snapshot_ingesta_info().get("project_id") else None
 REDEDGE_COLOR_MATRIX = np.array(
     [
         [1.08, -0.04, -0.04],
@@ -53,7 +52,7 @@ def _cache_buster_tiles_rgb(ruta):
     try:
         raster_version = os.stat(ruta).st_mtime_ns
         clip_path = _clip_path()
-        recorte_version = os.stat(clip_path).st_mtime_ns if os.path.isfile(clip_path) else 0
+        recorte_version = os.stat(clip_path).st_mtime_ns if clip_path and os.path.isfile(clip_path) else 0
         project_id = runtime.snapshot_ingesta_info().get("project_id") or "legacy"
         return f"{project_id}-{raster_version}-{recorte_version}-{RGB_TILE_RENDER_VERSION}"
     except OSError:
@@ -74,7 +73,7 @@ def _geometrias_recorte_raster(ruta, version, crs):
 
 def _mascara_recorte(src, bounds, out_shape):
     clip_path = _clip_path()
-    if not os.path.isfile(clip_path):
+    if not clip_path or not os.path.isfile(clip_path):
         return None
     version = os.stat(clip_path).st_mtime_ns
     crs = src.crs.to_string() if src.crs else "EPSG:4326"
@@ -483,7 +482,7 @@ def _bounds_ortomosaico_rgb():
             else:
                 left, bottom, right, top = transform_bounds(src.crs, "EPSG:4326", *src.bounds, densify_pts=21)
             clip_path = _clip_path()
-            if os.path.isfile(clip_path):
+            if clip_path and os.path.isfile(clip_path):
                 geometrias = _geometrias_recorte_raster(
                     clip_path, os.stat(clip_path).st_mtime_ns, "EPSG:4326"
                 )

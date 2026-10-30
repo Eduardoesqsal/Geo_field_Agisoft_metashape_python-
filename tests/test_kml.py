@@ -46,7 +46,7 @@ class ImportarKMLTest(unittest.TestCase):
             limite = os.path.join(carpeta, "recorte.geojson")
             with open(archivo_zip, "rb") as archivo:
                 upload = UploadFile(file=io.BytesIO(archivo.read()), filename="areas.zip")
-            with patch("backend.services.vector_overlay.CLIP_GEOJSON", limite):
+            with patch("backend.services.vector_overlay._clip_path", return_value=limite):
                 respuesta = asyncio.run(cargar_y_sincronizar_desde_upload(upload))
             self.assertEqual(respuesta["feature_count"], 2)
             with open(limite, encoding="utf-8") as archivo:
@@ -73,16 +73,49 @@ class ImportarKMLTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as carpeta:
             limite = os.path.join(carpeta, "recorte.geojson")
             upload = UploadFile(file=io.BytesIO(self.KML.encode()), filename="area.kml")
-            with patch("backend.services.vector_overlay.CLIP_GEOJSON", limite):
+            with patch("backend.services.vector_overlay._clip_path", return_value=limite):
                 respuesta = asyncio.run(cargar_y_sincronizar_desde_upload(upload))
             self.assertTrue(respuesta["ok"])
             with open(limite, encoding="utf-8") as archivo:
                 self.assertEqual(json.load(archivo)["features"][0]["geometry"]["type"], "Polygon")
 
+    def test_geojson_y_kmz_importados_activan_recorte(self):
+        geojson = {
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "properties": {},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[-100.06, 20.76], [-100.05, 20.76],
+                                     [-100.05, 20.77], [-100.06, 20.77], [-100.06, 20.76]]],
+                },
+            }],
+        }
+        kmz = io.BytesIO()
+        with zipfile.ZipFile(kmz, "w") as archivo:
+            archivo.writestr("doc.kml", self.KML)
+        for nombre, contenido, formato in (
+            ("area.geojson", json.dumps(geojson).encode(), "geojson"),
+            ("area.json", json.dumps(geojson).encode(), "json"),
+            ("area.kmz", kmz.getvalue(), "kml"),
+        ):
+            with self.subTest(nombre=nombre), tempfile.TemporaryDirectory() as carpeta:
+                limite = os.path.join(carpeta, "recorte.geojson")
+                upload = UploadFile(file=io.BytesIO(contenido), filename=nombre)
+                with patch("backend.services.vector_overlay._clip_path", return_value=limite):
+                    respuesta = asyncio.run(cargar_y_sincronizar_desde_upload(upload))
+                self.assertTrue(respuesta["ok"])
+                self.assertIn("recortara", respuesta["mensaje"])
+                with open(limite, encoding="utf-8") as archivo:
+                    guardado = json.load(archivo)
+                self.assertEqual(guardado["_recorte"]["formato"], formato)
+                self.assertEqual(guardado["features"][0]["geometry"]["type"], "Polygon")
+
     def test_roi_dibujado_usa_el_mismo_recorte(self):
         with tempfile.TemporaryDirectory() as carpeta:
             limite = os.path.join(carpeta, "recorte.geojson")
-            with patch("backend.services.vector_overlay.CLIP_GEOJSON", limite):
+            with patch("backend.services.vector_overlay._clip_path", return_value=limite):
                 respuesta = guardar_roi_dibujado([[-100.06, 20.76], [-100.05, 20.76], [-100.05, 20.77], [-100.06, 20.77]])
             self.assertEqual(respuesta["formato"], "roi")
             with open(limite, encoding="utf-8") as archivo:
@@ -92,7 +125,7 @@ class ImportarKMLTest(unittest.TestCase):
             anterior = dict(runtime.shapefile_overlay_cache)
             try:
                 runtime.shapefile_overlay_cache["geojson"] = None
-                with patch("backend.services.vector_overlay.CLIP_GEOJSON", limite):
+                with patch("backend.services.vector_overlay._clip_path", return_value=limite):
                     recuperar_recorte_guardado()
                 self.assertEqual(runtime.shapefile_overlay_cache["nombre"], "ROI dibujado")
             finally:
@@ -103,7 +136,7 @@ class ImportarKMLTest(unittest.TestCase):
             limite = os.path.join(carpeta, "recorte.geojson")
             with open(limite, "w", encoding="utf-8") as archivo:
                 archivo.write("recorte existente")
-            with patch("backend.services.vector_overlay.CLIP_GEOJSON", limite):
+            with patch("backend.services.vector_overlay._clip_path", return_value=limite):
                 with self.assertRaises(HTTPException):
                     guardar_roi_dibujado([[0, 0], [1, 1], [0, 1], [1, 0]])
             with open(limite, encoding="utf-8") as archivo:
