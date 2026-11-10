@@ -13,6 +13,7 @@ from backend.core.catalog import (
 from backend.core.naming import normalizar_modelo_camara, sanitizar_nombre_proyecto
 from backend.core.paths import DATASET_DIR, PROYECTO_DIR
 from backend.services.ingestion import _actualizar_puntos_gps_desde_dataset
+from backend.services.job_receiver import _store as job_store
 
 
 def _assert_idle():
@@ -33,6 +34,8 @@ def catalog_status():
 
 def create_project(nombre=None, camera_model=None):
     _assert_idle()
+    if job_store.active_job():
+        raise HTTPException(status_code=409, detail="Termina o cancela el trabajo recibido antes de crear otro proyecto")
     info = state.snapshot_ingesta_info()
     dataset_id = info.get("dataset_id") or "legacy"
     name = sanitizar_nombre_proyecto(nombre or "proyecto")
@@ -55,6 +58,9 @@ def create_project(nombre=None, camera_model=None):
 
 def select_project(project_id):
     _assert_idle()
+    active_job = job_store.active_job()
+    if active_job and active_job.get("project_id") != project_id:
+        raise HTTPException(status_code=409, detail="Termina o cancela el trabajo recibido antes de cambiar de proyecto")
     item = next((item for item in list_projects() if item["id"] == project_id), None)
     if item is None:
         raise HTTPException(status_code=404, detail="Proyecto no encontrado")
@@ -98,6 +104,9 @@ def close_project():
 
 def select_dataset(dataset_id):
     _assert_idle()
+    active_project_id = state.snapshot_ingesta_info().get("project_id")
+    if active_project_id and job_store.job_for_project(active_project_id):
+        raise HTTPException(status_code=409, detail="El dataset de un trabajo recibido no se puede cambiar")
     item = next((item for item in list_datasets() if item["id"] == dataset_id), None)
     if item is None:
         raise HTTPException(status_code=404, detail="Dataset no encontrado")
@@ -118,6 +127,9 @@ def select_dataset(dataset_id):
 
 def prepare_dataset_upload(nombre):
     _assert_idle()
+    active_project_id = state.snapshot_ingesta_info().get("project_id")
+    if active_project_id and job_store.job_for_project(active_project_id):
+        raise HTTPException(status_code=409, detail="Las fotos del trabajo recibido ya estan cargadas")
     dataset_id = unique_id(DATASET_DIR, os.path.splitext(os.path.basename(nombre))[0] or "dataset")
     os.makedirs(dataset_path(dataset_id), exist_ok=False)
     state.update_ingesta_info(dataset_id=dataset_id)
@@ -185,6 +197,7 @@ def delete_project(project_id, delete_dataset=False):
     shutil.rmtree(candidate)
     if dataset_target is not None:
         shutil.rmtree(dataset_target)
+    job_store.unlink_project(project_id)
     if info.get("project_id") == project_id or (delete_dataset and info.get("dataset_id") == dataset_id):
         camera_model = info.get("camera_model")
         state.reset_runtime_state()

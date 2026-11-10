@@ -12,6 +12,7 @@ import backend.core.catalog as catalog
 import backend.core.state as state
 import backend.services.projects as projects
 import backend.services.process as processing
+from backend.services.job_receiver import JobStore
 import backend.services.overlay as overlay
 from backend.services.ingestion import _extraer_zip_a_dataset
 from backend.services.ingestion import _contar_imagenes_en_directorio
@@ -34,6 +35,8 @@ class MultiplesProyectosTest(unittest.TestCase):
             patch.object(catalog, "PROYECTO_DIR", project_root),
             patch.object(projects, "DATASET_DIR", dataset_root),
             patch.object(projects, "PROYECTO_DIR", project_root),
+            patch.object(projects, "job_store", JobStore(os.path.join(self.temporary.name, "incoming"))),
+            patch.object(processing, "job_store", JobStore(os.path.join(self.temporary.name, "incoming"))),
         ]
         for item in patches:
             item.start()

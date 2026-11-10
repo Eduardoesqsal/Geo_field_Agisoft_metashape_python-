@@ -28,13 +28,14 @@ from backend.services.overlay import (
 from backend.services.vector_overlay import cargar_y_sincronizar_desde_upload, guardar_roi_dibujado, recuperar_recorte_guardado
 from backend.services.process import detener_proceso, iniciar_proceso
 from backend.services.job_receiver import queue_files, queue_status
+from backend.services.job_handoff import prepare_received_job
 from backend.services.projects import (
     catalog_status, close_project, create_project, delete_project, finish_project, prepare_dataset_upload, select_dataset, select_project,
 )
 
 router = APIRouter()
 
-
+#testing y punto de entyrada de la aplicacion
 def _clip_path():
     return runtime_state.active_clip_path() if runtime_state.snapshot_ingesta_info().get("project_id") else None
 
@@ -70,6 +71,11 @@ def archivos_trabajo(organization_id: str, batch_id: str):
         return {"files": queue_files(organization_id, batch_id)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/trabajos/{organization_id}/{batch_id}/preparar")
+def preparar_trabajo(organization_id: str, batch_id: str, camera_model: str = Form(...)):
+    return prepare_received_job(organization_id, batch_id, camera_model)
 
 
 @router.get("/overlay/status")

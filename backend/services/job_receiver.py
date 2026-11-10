@@ -85,6 +85,13 @@ class JobStore:
             local_path TEXT NOT NULL,
             PRIMARY KEY (organization_id, batch_id, file_id)
         )""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS job_projects (
+            organization_id TEXT NOT NULL,
+            batch_id TEXT NOT NULL,
+            project_id TEXT NOT NULL UNIQUE,
+            dataset_id TEXT NOT NULL UNIQUE,
+            PRIMARY KEY (organization_id, batch_id)
+        )""")
             yield connection
             connection.commit()
         except Exception:
@@ -129,9 +136,87 @@ class JobStore:
 
     def list_jobs(self):
         with self._connect() as db:
-            rows = db.execute("""SELECT * FROM jobs
-                ORDER BY COALESCE(completed_at, updated_at), batch_id""").fetchall()
+            rows = db.execute("""SELECT jobs.*, job_projects.project_id, job_projects.dataset_id
+                FROM jobs LEFT JOIN job_projects USING (organization_id, batch_id)
+                ORDER BY COALESCE(jobs.completed_at, jobs.updated_at), jobs.batch_id""").fetchall()
         return [dict(row) for row in rows]
+
+    def get_job(self, org, batch):
+        with self._connect() as db:
+            row = db.execute("""SELECT jobs.*, job_projects.project_id, job_projects.dataset_id
+                FROM jobs LEFT JOIN job_projects USING (organization_id, batch_id)
+                WHERE jobs.organization_id=? AND jobs.batch_id=?""", (org, batch)).fetchone()
+        return dict(row) if row else None
+
+    def job_for_project(self, project_id):
+        with self._connect() as db:
+            row = db.execute("""SELECT jobs.*, job_projects.project_id, job_projects.dataset_id
+                FROM job_projects JOIN jobs USING (organization_id, batch_id)
+                WHERE job_projects.project_id=?""", (project_id,)).fetchone()
+        return dict(row) if row else None
+
+    def active_job(self):
+        with self._connect() as db:
+            row = db.execute("""SELECT jobs.*, job_projects.project_id, job_projects.dataset_id
+                FROM jobs LEFT JOIN job_projects USING (organization_id, batch_id)
+                WHERE jobs.state IN ('preparing', 'prepared', 'processing')
+                ORDER BY COALESCE(jobs.completed_at, jobs.updated_at), jobs.batch_id LIMIT 1""").fetchone()
+        return dict(row) if row else None
+
+    def unlink_project(self, project_id):
+        with self._connect() as db:
+            row = db.execute("""SELECT organization_id, batch_id FROM job_projects
+                WHERE project_id=?""", (project_id,)).fetchone()
+            if row is None:
+                return
+            db.execute("DELETE FROM job_projects WHERE project_id=?", (project_id,))
+            db.execute("""UPDATE jobs SET state='cancelled', updated_at=?
+                WHERE organization_id=? AND batch_id=?""",
+                (_now(), row["organization_id"], row["batch_id"]))
+
+    def next_ready(self):
+        with self._connect() as db:
+            if db.execute("""SELECT 1 FROM jobs
+                WHERE state IN ('preparing', 'prepared', 'processing') LIMIT 1""").fetchone():
+                return None
+            row = db.execute("""SELECT organization_id, batch_id, job_code
+                FROM jobs WHERE state='ready'
+                ORDER BY COALESCE(completed_at, updated_at), batch_id LIMIT 1""").fetchone()
+        return dict(row) if row else None
+
+    def claim_next(self, org, batch):
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("""SELECT 1 FROM jobs
+                WHERE state IN ('preparing', 'prepared', 'processing') LIMIT 1""").fetchone():
+                return False
+            row = db.execute("""SELECT organization_id, batch_id FROM jobs WHERE state='ready'
+                ORDER BY COALESCE(completed_at, updated_at), batch_id LIMIT 1""").fetchone()
+            if row is None or (row["organization_id"], row["batch_id"]) != (org, batch):
+                return False
+            db.execute("""UPDATE jobs SET state='preparing', updated_at=?
+                WHERE organization_id=? AND batch_id=?""", (_now(), org, batch))
+            return True
+
+    def link_project(self, org, batch, project_id, dataset_id):
+        with self._connect() as db:
+            updated = db.execute("""UPDATE jobs SET state='prepared', error=NULL, updated_at=?
+                WHERE organization_id=? AND batch_id=? AND state='preparing'""",
+                (_now(), org, batch))
+            if updated.rowcount != 1:
+                raise ValueError("El trabajo ya no esta en preparacion")
+            db.execute("""INSERT INTO job_projects
+                (organization_id, batch_id, project_id, dataset_id) VALUES (?, ?, ?, ?)""",
+                (org, batch, project_id, dataset_id))
+
+    def release_interrupted_preparation(self):
+        with self._connect() as db:
+            db.execute("""UPDATE jobs SET state='ready', error=NULL, updated_at=?
+                WHERE state='preparing' AND NOT EXISTS (
+                    SELECT 1 FROM job_projects
+                    WHERE job_projects.organization_id=jobs.organization_id
+                    AND job_projects.batch_id=jobs.batch_id
+                )""", (_now(),))
 
     def list_files(self, org, batch):
         with self._connect() as db:
@@ -303,7 +388,7 @@ class JobReceiver:
             except (KeyError, TypeError, ValueError) as exc:
                 LOGGER.warning("GeoField devolvió un lote inválido: %s", exc)
                 continue
-            if self.store.state(org, batch) == "ready":
+            if self.store.state(org, batch) not in {"pending", "downloading", "error"}:
                 continue
             try:
                 detail = self.client.detail(org, batch)
@@ -360,6 +445,7 @@ _configuration_error = None
 
 def start_receiver():
     global _receiver, _configuration_error
+    _store.release_interrupted_preparation()
     base = os.environ.get("GEOFIELD_API_BASE_URL", "").strip()
     if not base:
         return
@@ -398,6 +484,7 @@ def queue_status():
         "last_check": _receiver.last_check if _receiver else None,
         "error": _receiver.error if _receiver else _configuration_error,
         "jobs": _store.list_jobs(),
+        "next_job": _store.next_ready(),
     }
 
 

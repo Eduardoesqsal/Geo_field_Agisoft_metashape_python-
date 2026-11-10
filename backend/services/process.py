@@ -7,13 +7,14 @@ from fastapi import HTTPException
 
 import backend.core.state as runtime_state
 from backend.core.naming import normalizar_modelo_camara
-from backend.core.catalog import image_count
+from backend.core.catalog import image_count, read_project_manifest
 from backend.core.paths import BASE_DIR, MAIN_SCRIPT, METASHAPE_EXE
 from backend.services.overlay import _sincronizar_overlay_proyecto
 from backend.services.projects import ensure_processing_project
+from backend.services.job_receiver import _store as job_store
 
 
-def reader_loop(proc):
+def reader_loop(proc, job=None):
     code = None
     try:
         for line in proc.stdout:
@@ -45,6 +46,13 @@ def reader_loop(proc):
                     except Exception:
                         pass
                     code = proc.poll()
+        if job:
+            try:
+                job_store.set_state(job["organization_id"], job["batch_id"],
+                                    "done" if code == 0 else "failed",
+                                    None if code == 0 else f"Metashape termino con codigo {code}")
+            except Exception as exc:
+                runtime_state.push_log(f"No se pudo actualizar la cola local: {exc}")
         runtime_state.update_state(
             running=False,
             finished_at=datetime.now().isoformat(timespec="seconds"),
@@ -71,8 +79,17 @@ def iniciar_proceso(nombre_proyecto=None, camera_model=None):
         if image_count(runtime_state.active_dataset_dir(), recursive=dataset_id != "legacy") <= 0:
             raise HTTPException(status_code=400, detail="Selecciona un dataset con imagenes validas")
 
-        modelo_camara = normalizar_modelo_camara(camera_model)
+        active_project_id = runtime_state.ingesta_info.get("project_id")
+        active_job = job_store.active_job()
+        if active_job and active_job.get("project_id") != active_project_id:
+            raise HTTPException(status_code=409, detail="Primero termina el trabajo recibido que tiene el turno")
+        existing_job = job_store.job_for_project(active_project_id) if active_project_id else None
+        modelo_camara = (
+            normalizar_modelo_camara(read_project_manifest(active_project_id).get("camera_model"))
+            if existing_job else normalizar_modelo_camara(camera_model)
+        )
         nombre_limpio = ensure_processing_project(nombre_proyecto, modelo_camara)
+        job = job_store.job_for_project(nombre_limpio)
 
         runtime_state.logs.clear()
         runtime_state.state.update(
@@ -106,7 +123,12 @@ def iniciar_proceso(nombre_proyecto=None, camera_model=None):
         except OSError as exc:
             runtime_state.state.update(running=False, step="error", message=f"No se pudo iniciar Metashape: {exc}")
             raise HTTPException(status_code=500, detail=f"No se pudo iniciar Metashape: {exc}") from exc
-        runtime_state.reader_thread = threading.Thread(target=reader_loop, args=(runtime_state.process,), daemon=True)
+        if job:
+            try:
+                job_store.set_state(job["organization_id"], job["batch_id"], "processing")
+            except Exception as exc:
+                runtime_state.push_log(f"No se pudo actualizar la cola local: {exc}")
+        runtime_state.reader_thread = threading.Thread(target=reader_loop, args=(runtime_state.process, job), daemon=True)
         runtime_state.reader_thread.start()
 
     runtime_state.push_log("Solicitud de inicio recibida")

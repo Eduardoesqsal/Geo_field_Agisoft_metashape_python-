@@ -323,10 +323,10 @@ function MapView({ points, datasetId, overlay, overlayVisible, finalMode, vector
 
       const layer = L.geoJSON(vectorGeojson, {
         style: {
-          color: '#f59e0b',
+          color: '#64ff10',
           weight: 2,
-          fillColor: '#f59e0b',
-          fillOpacity: 0.18,
+          fillColor: '#64ff10',
+          fillOpacity: 0,
         },
         onEachFeature(feature, leafletLayer) {
           const props = feature?.properties || {}
@@ -590,6 +590,7 @@ export default function App() {
   const [vectorOverlay, setVectorOverlay] = useState(null)
   const [catalog, setCatalog] = useState({ proyectos: [], datasets: [], project_id: null, dataset_id: 'legacy' })
   const [jobQueue, setJobQueue] = useState({ enabled: false, running: false, jobs: [] })
+  const [jobSensors, setJobSensors] = useState({})
   const [activeModal, setActiveModal] = useState(null)
   const [deletingProjectId, setDeletingProjectId] = useState(null)
   const [savingProject, setSavingProject] = useState(false)
@@ -598,6 +599,8 @@ export default function App() {
   const zipInputRef = useRef(null)
   const vectorInputRef = useRef(null)
   const seenReadyJobsRef = useRef(null)
+  const pendingPrepareRef = useRef(null)
+  const previousRunningRef = useRef(false)
   const promptedCompletionRef = useRef(null)
 
   const addRoiPoint = useCallback(([lon, lat]) => {
@@ -611,8 +614,12 @@ export default function App() {
   const finalMode = Boolean(status?.step === 'finalizado' && !status?.running)
   const processingPercent = processingProgress(status)
   const points = ingesta?.puntos_gps || []
-  const waitingJobs = (jobQueue.jobs || []).filter((job) => job.state === 'pending' || job.state === 'downloading' || job.state === 'ready').length
-  const processedProjects = catalog.proyectos.filter((item) => item.procesado && item.ortomosaico_listo)
+  const waitingJobs = (jobQueue.jobs || []).filter((job) =>
+    ['pending', 'downloading', 'ready', 'preparing', 'prepared'].includes(job.state)).length
+  const currentReceivedJob = (jobQueue.jobs || []).find((job) => job.project_id && job.project_id === ingesta?.project_id)
+  const canDeleteDataset = (project) => Boolean(project && !project.id.startsWith('legacy:')
+    && project.dataset_id && project.dataset_id !== 'legacy'
+    && !catalog.proyectos.some((item) => item.id !== project.id && item.dataset_id === project.dataset_id))
 
   const refreshAll = async () => {
     setRefreshing(true)
@@ -631,6 +638,25 @@ export default function App() {
       setOverlay(overlayData)
       setVectorOverlay(vectorData)
       setJobQueue(queueData)
+      if (previousRunningRef.current && !statusData.running && queueData.next_job
+        && ['finalizado', 'error'].includes(statusData.step)) {
+        const succeeded = statusData.step === 'finalizado'
+        showMessage(succeeded ? 'success' : 'error',
+          `${succeeded ? 'Terminó el procesamiento' : 'El trabajo terminó con error'}. Siguiente trabajo listo: ${queueData.next_job.job_code}`)
+      }
+      previousRunningRef.current = Boolean(statusData.running)
+      if (pendingPrepareRef.current && !statusData.running) {
+        const preparedJob = (queueData.jobs || []).find((job) =>
+          `${job.organization_id}:${job.batch_id}` === pendingPrepareRef.current)
+        if (preparedJob?.state === 'prepared' && ingestaData.project_id === preparedJob.project_id) {
+          pendingPrepareRef.current = null
+          setActiveModal('images')
+          showMessage('success', `Proyecto ${preparedJob.job_code} listo: revisa las fotos y el ROI antes de procesar`)
+        } else if (preparedJob?.state === 'failed') {
+          pendingPrepareRef.current = null
+          showMessage('error', preparedJob.error || 'No se pudo preparar el trabajo')
+        }
+      }
       const readyIds = new Set((queueData.jobs || [])
         .filter((job) => job.state === 'ready')
         .map((job) => `${job.organization_id}:${job.batch_id}`))
@@ -641,7 +667,7 @@ export default function App() {
       }
       seenReadyJobsRef.current = readyIds
       setProjectName(ingestaData.project_id ? ingestaData.nombre_proyecto || '' : '')
-      setCameraModel((current) => current || ingestaData.camera_model || 'mavic_3_rgb')
+      if (ingestaData.project_id) setCameraModel(ingestaData.camera_model || 'mavic_3_rgb')
       setProjectPrepared(Boolean(ingestaData.project_id))
     } catch (error) {
       setNotice({ kind: 'error', text: error.message || 'No se pudo actualizar el estado' })
@@ -744,32 +770,43 @@ export default function App() {
     }
   }
 
-  const deleteProject = async () => {
-    const projectId = catalog.project_id
-    if (!projectId || projectId.startsWith('legacy:')) return
-    if (!window.confirm(`¿Borrar el proyecto "${projectId}" y todos los archivos de su carpeta? El dataset de fotos se conservará.`)) return
+  const prepareIncomingJob = async (job) => {
+    const key = `${job.organization_id}:${job.batch_id}`
+    const sensor = jobSensors[key]
+    if (!sensor) {
+      showMessage('error', 'Selecciona el sensor del trabajo')
+      return
+    }
     try {
-      const data = await apiJson(`/proyectos/${encodeURIComponent(projectId)}`, { method: 'DELETE' })
-      setProjectName('')
-      setProjectPrepared(false)
-      window.sessionStorage.removeItem('geofield-project-prepared')
+      const formData = new FormData()
+      formData.append('camera_model', sensor)
+      const data = await apiJson(`/trabajos/${encodeURIComponent(job.organization_id)}/${encodeURIComponent(job.batch_id)}/preparar`, {
+        method: 'POST', body: formData,
+      })
+      pendingPrepareRef.current = key
+      setCameraModel(sensor)
+      showMessage('success', data.mensaje || 'Preparando las fotos recibidas')
       await refreshAll()
-      await refreshCatalog()
-      showMessage('success', data.mensaje || 'Proyecto borrado')
     } catch (error) {
-      showMessage('error', error.message || 'No se pudo borrar el proyecto')
+      showMessage('error', error.message || 'No se pudo preparar el trabajo')
     }
   }
 
-  const deleteProjectAndDataset = async (project) => {
-    if (!project || status?.running || deletingProjectId || project.id.startsWith('legacy:')
-      || project.dataset_id === 'legacy' || catalog.proyectos.some(
-        (item) => item.id !== project.id && item.dataset_id === project.dataset_id,
-      )) return
-    if (!window.confirm(`¿Borrar definitivamente el proyecto "${project.nombre}" y el dataset "${project.dataset_id}" con todas sus fotos?`)) return
+  const deleteProject = async () => {
+    const project = catalog.proyectos.find((item) => item.id === catalog.project_id)
+    if (project) await deleteProjectWithFiles(project, canDeleteDataset(project))
+  }
+
+  const deleteProjectWithFiles = async (project, deleteDataset) => {
+    if (!project || status?.running || deletingProjectId || project.id.startsWith('legacy:')) return
+    if (deleteDataset && !canDeleteDataset(project)) return
+    const confirmation = deleteDataset
+      ? `¿Borrar definitivamente el proyecto "${project.nombre}" y el dataset "${project.dataset_id}" con todas sus fotos?`
+      : `¿Borrar definitivamente el proyecto "${project.nombre}"? Su dataset se conservará porque es compartido o pertenece al área original.`
+    if (!window.confirm(confirmation)) return
     setDeletingProjectId(project.id)
     try {
-      const data = await apiJson(`/proyectos/${encodeURIComponent(project.id)}?delete_dataset=true`, { method: 'DELETE' })
+      const data = await apiJson(`/proyectos/${encodeURIComponent(project.id)}?delete_dataset=${deleteDataset}`, { method: 'DELETE' })
       if (catalog.project_id === project.id) {
         setProjectName('')
         setProjectPrepared(false)
@@ -777,9 +814,9 @@ export default function App() {
       }
       await refreshAll()
       await refreshCatalog()
-      showMessage('success', data.mensaje || 'Proyecto y dataset borrados')
+      showMessage('success', data.mensaje || 'Proyecto borrado')
     } catch (error) {
-      showMessage('error', error.message || 'No se pudo borrar el proyecto y su dataset')
+      showMessage('error', error.message || 'No se pudo borrar el proyecto')
     } finally {
       setDeletingProjectId(null)
     }
@@ -1081,7 +1118,7 @@ export default function App() {
         </button>
         <button type="button" className={`dock-button ${activeModal === 'delete' ? 'is-active' : ''}`}
           onClick={() => { if (activeModal !== 'delete') refreshCatalog().catch(() => {}); toggleModal('delete') }}
-          title="Proyectos procesados" aria-label="Proyectos procesados">
+          title="Proyectos" aria-label="Proyectos">
           <Icon name="map" />
         </button>
       </nav>
@@ -1107,7 +1144,7 @@ export default function App() {
                   {activeModal === 'images' && 'Imágenes'}
                   {activeModal === 'roi' && 'Importar o dibujar ROI'}
                   {activeModal === 'logs' && 'Logs de procesamiento'}
-                  {activeModal === 'delete' && 'Proyectos procesados'}
+                  {activeModal === 'delete' && 'Proyectos'}
                   {activeModal === 'save' && 'Proyecto terminado'}
                 </h2>
               </div>
@@ -1125,22 +1162,46 @@ export default function App() {
                   <strong>{waitingJobs} en cola</strong>
                 </div>
                 {jobQueue.error && <p className="job-queue-error">{jobQueue.error}</p>}
+                {ingesta?.project_id && jobQueue.next_job &&
+                  <p className="project-help">Guarda o cierra el proyecto actual para abrir el siguiente trabajo.</p>}
                 <div className="workspace-table-wrap">
                   <table className="workspace-table">
-                    <thead><tr><th>Trabajo</th><th>Organización</th><th>ZIP</th><th>Estado</th><th>Actualizado</th></tr></thead>
+                    <thead><tr><th>Trabajo</th><th>Organización</th><th>ZIP</th><th>Estado</th><th>Actualizado</th><th>Sensor</th><th>Acción</th></tr></thead>
                     <tbody>
-                      {(jobQueue.jobs || []).map((job) => (
-                        <tr key={`${job.organization_id}:${job.batch_id}`}>
+                      {(jobQueue.jobs || []).map((job) => {
+                        const key = `${job.organization_id}:${job.batch_id}`
+                        const isNext = jobQueue.next_job?.organization_id === job.organization_id
+                          && jobQueue.next_job?.batch_id === job.batch_id
+                        return <tr key={key}>
                           <td><strong>{job.job_code}</strong>{job.error && <small className="job-queue-error">{job.error}</small>}</td>
                           <td>{job.organization_name || job.organization_id}</td>
                           <td>{job.file_count}</td>
                           <td><span className={`job-queue-state job-queue-state-${job.state}`}>
-                            {({ pending: 'Nuevo', downloading: 'Descargando', ready: 'En espera', error: 'Error' })[job.state] || job.state}
+                            {({ pending: 'Nuevo', downloading: 'Descargando', ready: 'En espera', preparing: 'Preparando',
+                              prepared: 'Listo para procesar', processing: 'Procesando', done: 'Terminado',
+                              failed: 'Falló', cancelled: 'Cancelado', error: 'Error de descarga' })[job.state] || job.state}
                           </span></td>
                           <td>{formatDate(job.updated_at)}</td>
+                          <td>{job.state === 'ready' ? <select className="job-sensor-select" value={jobSensors[key] || ''}
+                            onChange={(event) => setJobSensors((current) => ({ ...current, [key]: event.target.value }))}>
+                            <option value="">Seleccionar</option>
+                            <option value="mavic_3_rgb">Mavic 3 RGB</option>
+                            <option value="mavic_3m">Mavic 3 MS</option>
+                            <option value="rededge_m">MicaSense RedEdge-M</option>
+                          </select> : job.project_id ? ({ mavic_3_rgb: 'Mavic 3 RGB', mavic_3m: 'Mavic 3 MS', rededge_m: 'MicaSense RedEdge-M' })[
+                            catalog.proyectos.find((item) => item.id === job.project_id)?.camera_model] || '-' : '-'}</td>
+                          <td>{job.state === 'ready' ? <button className="round-action is-primary" type="button"
+                            onClick={() => prepareIncomingJob(job)}
+                            disabled={!isNext || !jobSensors[key] || status?.running || Boolean(ingesta?.project_id)}>
+                            <Icon name="folder" /> Preparar
+                          </button> : job.project_id ? <button className="round-action" type="button"
+                            onClick={() => selectProject(job.project_id, true)}
+                            disabled={status?.running || Boolean(ingesta?.project_id && ingesta.project_id !== job.project_id)}>
+                            <Icon name="map" /> Abrir
+                          </button> : '-'}</td>
                         </tr>
-                      ))}
-                      {!jobQueue.jobs?.length && <tr><td colSpan="5" className="workspace-empty">Aún no hay trabajos recibidos.</td></tr>}
+                      })}
+                      {!jobQueue.jobs?.length && <tr><td colSpan="7" className="workspace-empty">Aún no hay trabajos recibidos.</td></tr>}
                     </tbody>
                   </table>
                 </div>
@@ -1173,8 +1234,9 @@ export default function App() {
                     </select>
                   </label>
                   <button className="round-action is-danger" onClick={deleteProject}
-                    disabled={status?.running || !catalog.project_id || catalog.project_id.startsWith('legacy:')}>
-                    <Icon name="trash" /> Borrar proyecto seleccionado
+                    disabled={status?.running || Boolean(deletingProjectId) || !catalog.project_id || catalog.project_id.startsWith('legacy:')}>
+                    <Icon name="trash" /> {canDeleteDataset(catalog.proyectos.find((item) => item.id === catalog.project_id))
+                      ? 'Borrar proyecto y dataset' : 'Borrar proyecto seleccionado'}
                   </button>
                 </details>
               </div>
@@ -1186,10 +1248,12 @@ export default function App() {
                   <Icon name="image" />
                   <div><strong>{ingesta?.imagenes_validas ?? 0} fotos</strong><span>{projectName || 'Proyecto actual'}</span></div>
                 </div>
-                <p className="project-help">Sube las fotos originales en ZIP. Sus ubicaciones aparecerán como puntos azules en el mapa.</p>
+                <p className="project-help">{currentReceivedJob
+                  ? `Fotos recibidas para ${currentReceivedJob.job_code}. Revisa sus puntos azules y configura el ROI antes de procesar.`
+                  : 'Sube las fotos originales en ZIP. Sus ubicaciones aparecerán como puntos azules en el mapa.'}</p>
                 <div className="workspace-action-row">
-                  <button className="round-action is-accent" onClick={uploadZip} disabled={status?.running}><Icon name="upload" /> Subir imágenes ZIP</button>
-                  <button className="round-action" onClick={() => setShowDrive((value) => !value)} disabled={status?.running}><Icon name="cloud" /> Importar desde Drive</button>
+                  <button className="round-action is-accent" onClick={uploadZip} disabled={status?.running || Boolean(currentReceivedJob)}><Icon name="upload" /> Subir imágenes ZIP</button>
+                  <button className="round-action" onClick={() => setShowDrive((value) => !value)} disabled={status?.running || Boolean(currentReceivedJob)}><Icon name="cloud" /> Importar desde Drive</button>
                 </div>
                 {showDrive && <div className="drive-box drive-box-white">
                   <input value={driveUrl} onChange={(event) => setDriveUrl(event.target.value)} placeholder="URL de Drive o ruta rclone" />
@@ -1199,7 +1263,7 @@ export default function App() {
                   <div className="progress-bar"><div className="progress-fill" style={{ width: `${uploadProgress}%` }} /></div></div>}
                 <label className="field"><span className="field-label">Dataset de fotos</span>
                   <select value={catalog.datasets.some((item) => item.id === catalog.dataset_id) ? catalog.dataset_id : ''}
-                    onChange={(event) => selectDataset(event.target.value)} disabled={status?.running}>
+                    onChange={(event) => selectDataset(event.target.value)} disabled={status?.running || Boolean(currentReceivedJob)}>
                     <option value="">Seleccionar dataset</option>
                     {catalog.datasets.map((item) => <option key={item.id} value={item.id}>{item.nombre} · {item.imagenes_validas} fotos</option>)}
                   </select>
@@ -1210,7 +1274,7 @@ export default function App() {
                   <button className="round-action is-primary" onClick={startProcess} disabled={status?.running || drawingRoi || !(ingesta?.imagenes_validas > 0)}>
                     <Icon name="play" /> Procesar proyecto
                   </button>
-                  <button className="round-action is-warning" onClick={stopProcess} disabled={!status?.running}><Icon name="stop" /> Detener</button>
+                  <button className="round-action is-warning" onClick={stopProcess} disabled={!status?.running || status?.step === 'preparando_dataset'}><Icon name="stop" /> Detener</button>
                   <button className="round-action" onClick={() => setOverlayVisible((value) => !value)} disabled={!overlay?.disponible}>
                     <Icon name="layers" /> {overlayVisible ? 'Ocultar ortomosaico' : 'Mostrar ortomosaico'}
                   </button>
@@ -1257,6 +1321,7 @@ export default function App() {
             {activeModal === 'save' && (
               <div className="workspace-modal-content workspace-form">
                 <p className="project-help">El procesamiento de <strong>{ingesta?.nombre_proyecto || 'este proyecto'}</strong> terminó. Sus archivos ya están en la carpeta del proyecto.</p>
+                {jobQueue.next_job && <p className="project-help">Siguiente en espera: <strong>{jobQueue.next_job.job_code}</strong>. Al guardar podrás abrirlo desde Trabajos.</p>}
                 <p className="project-help">¿Guardar el trabajo y volver al mapa base para comenzar el siguiente?</p>
                 <div className="workspace-action-row">
                   <button className="round-action is-primary" onClick={saveProjectAndContinue} disabled={savingProject}>
@@ -1269,17 +1334,18 @@ export default function App() {
 
             {activeModal === 'delete' && (
               <div className="workspace-modal-content">
-                <p className="project-help">Selecciona un proyecto para ver su ortomosaico en el mapa. También puedes borrarlo junto con las fotos de su dataset.</p>
+                <p className="project-help">Selecciona un proyecto para abrirlo o bórralo. Sus fotos también se borrarán cuando ningún otro proyecto use el dataset.</p>
                 <div className="workspace-table-wrap">
                   <table className="workspace-table">
                     <thead><tr><th>Proyecto</th><th>Sensor</th><th>Dataset</th><th>Fotos</th><th>Acción</th></tr></thead>
                     <tbody>
-                      {processedProjects.map((project) => {
+                      {catalog.proyectos.map((project) => {
                         const shared = catalog.proyectos.some((item) => item.id !== project.id && item.dataset_id === project.dataset_id)
-                        const blocked = project.id.startsWith('legacy:') || project.dataset_id === 'legacy' || shared
+                        const blocked = project.id.startsWith('legacy:')
+                        const deleteDataset = canDeleteDataset(project)
                         const reason = project.id.startsWith('legacy:') ? 'Proyecto antiguo sin carpeta propia'
-                          : project.dataset_id === 'legacy' ? 'Dataset original compartido'
-                            : shared ? 'Dataset usado por otro proyecto' : null
+                          : project.dataset_id === 'legacy' ? 'El dataset original se conservará'
+                            : shared ? 'El dataset se conservará: otro proyecto lo usa' : null
                         return <tr key={project.id}>
                           <td><strong>{project.nombre}</strong></td>
                           <td>{({ mavic_3_rgb: 'Mavic 3 RGB', mavic_3m: 'Mavic 3 MS', rededge_m: 'MicaSense RedEdge-M' })[project.camera_model] || project.camera_model || '-'}</td>
@@ -1287,18 +1353,18 @@ export default function App() {
                           <td>{catalog.datasets.find((item) => item.id === project.dataset_id)?.imagenes_validas ?? 0}</td>
                           <td><div className="workspace-action-row">
                             <button type="button" className="round-action is-primary" onClick={() => selectProject(project.id, true)}
-                              disabled={status?.running || Boolean(deletingProjectId)} title={`Ver ortomosaico de ${project.nombre}`}>
-                              <Icon name="map" /> Ver orto
+                              disabled={status?.running || Boolean(deletingProjectId)} title={`Abrir ${project.nombre}`}>
+                              <Icon name="map" /> {project.ortomosaico_listo ? 'Ver orto' : 'Abrir'}
                             </button>
-                            <button type="button" className="round-action is-danger" onClick={() => deleteProjectAndDataset(project)}
+                            <button type="button" className="round-action is-danger" onClick={() => deleteProjectWithFiles(project, deleteDataset)}
                               disabled={status?.running || Boolean(deletingProjectId) || blocked}
                               title={reason || 'Borrar proyecto y dataset'}>
-                              <Icon name="trash" /> {deletingProjectId === project.id ? 'Borrando...' : 'Borrar todo'}
+                              <Icon name="trash" /> {deletingProjectId === project.id ? 'Borrando...' : deleteDataset ? 'Borrar proyecto y fotos' : 'Borrar proyecto'}
                             </button>
                           </div>{reason && <small>{reason}</small>}</td>
                         </tr>
                       })}
-                      {!processedProjects.length && <tr><td colSpan="5" className="workspace-empty">Aún no hay proyectos procesados.</td></tr>}
+                      {!catalog.proyectos.length && <tr><td colSpan="5" className="workspace-empty">Aún no hay proyectos.</td></tr>}
                     </tbody>
                   </table>
                 </div>
